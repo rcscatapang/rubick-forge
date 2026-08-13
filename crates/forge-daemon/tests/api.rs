@@ -1,107 +1,12 @@
 //! End-to-end checks of the HTTP/WS surface against an in-process daemon.
 
-use std::net::SocketAddr;
+mod harness;
 
-use axum::body::{to_bytes, Body};
+use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use forge_core::{EventRecord, ForgeEvent};
-use forge_daemon::bus::Bus;
-use forge_daemon::config::Config;
-use forge_daemon::http::{router, AppState};
-use forge_daemon::store::Store;
-use forge_daemon::token::Token;
 use futures_util::StreamExt;
-use tower::ServiceExt;
-
-type Socket =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
-/// A daemon with a throwaway token and an in-memory database.
-struct Harness {
-    state: AppState,
-    token: String,
-    _temp: tempfile::TempDir,
-}
-
-impl Harness {
-    fn new() -> Self {
-        let temp = tempfile::tempdir().unwrap();
-        let token = Token::load_or_create(&temp.path().join("token")).unwrap();
-        let secret = token.expose().to_owned();
-        let store = Store::open_in_memory().unwrap();
-        let bus = Bus::new(store.clone());
-
-        Self {
-            state: AppState::new(bus, store, token, Config::default(), "0.1.0-test"),
-            token: secret,
-            _temp: temp,
-        }
-    }
-
-    fn bus(&self) -> &Bus {
-        &self.state.bus
-    }
-
-    async fn send(&self, request: Request<Body>) -> (StatusCode, serde_json::Value) {
-        let response = router(self.state.clone()).oneshot(request).await.unwrap();
-        let status = response.status();
-        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
-        (status, json)
-    }
-
-    async fn get(&self, uri: &str) -> (StatusCode, serde_json::Value) {
-        self.send(Request::builder().uri(uri).body(Body::empty()).unwrap())
-            .await
-    }
-
-    async fn get_authed(&self, uri: &str) -> (StatusCode, serde_json::Value) {
-        self.send(
-            Request::builder()
-                .uri(uri)
-                .header("authorization", format!("Bearer {}", self.token))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-    }
-
-    /// Open a WebSocket and wait until its handler has really subscribed.
-    ///
-    /// The handshake completes before the upgraded task runs, so publishing
-    /// straight after a connect would otherwise race the subscription.
-    async fn connect(&self, addr: SocketAddr, query: &str) -> Socket {
-        let before = self.bus().subscriber_count();
-        let (socket, _) =
-            tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events?{query}"))
-                .await
-                .expect("the upgrade should be accepted");
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while self.bus().subscriber_count() <= before {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "handler never subscribed"
-            );
-            tokio::task::yield_now().await;
-        }
-
-        socket
-    }
-
-    /// Bind a real socket, so WebSocket clients have something to connect to.
-    async fn serve(&self) -> SocketAddr {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let app = router(self.state.clone());
-
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-
-        addr
-    }
-}
+use harness::{Harness, Socket};
 
 fn project_event(id: i64) -> ForgeEvent {
     ForgeEvent::ProjectRegistered {
@@ -126,7 +31,7 @@ async fn next_event(socket: &mut Socket) -> EventRecord {
 async fn health_answers_without_a_token() {
     let harness = Harness::new();
 
-    let (status, body) = harness.get("/health").await;
+    let (status, body) = harness.anonymous_get("/health").await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["version"], "0.1.0-test");
@@ -145,7 +50,7 @@ async fn health_answers_without_a_token() {
 async fn every_other_endpoint_needs_the_right_token() {
     let harness = Harness::new();
 
-    let (status, body) = harness.get("/events").await;
+    let (status, body) = harness.anonymous_get("/events").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["error"]["code"], "unauthorized");
 
@@ -160,7 +65,7 @@ async fn every_other_endpoint_needs_the_right_token() {
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-    let (status, _) = harness.get_authed("/events").await;
+    let (status, _) = harness.get("/events").await;
     assert_eq!(status, StatusCode::OK);
 }
 
@@ -169,7 +74,7 @@ async fn a_rest_endpoint_refuses_a_token_in_the_url() {
     let harness = Harness::new();
 
     let (status, _) = harness
-        .get(&format!("/events?token={}", harness.token))
+        .anonymous_get(&format!("/events?token={}", harness.token))
         .await;
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -179,7 +84,7 @@ async fn a_rest_endpoint_refuses_a_token_in_the_url() {
 async fn unknown_paths_and_methods_answer_in_the_error_envelope() {
     let harness = Harness::new();
 
-    let (status, body) = harness.get_authed("/projects").await;
+    let (status, body) = harness.get("/nowhere").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"]["code"], "not_found");
 
@@ -200,7 +105,7 @@ async fn unknown_paths_and_methods_answer_in_the_error_envelope() {
 async fn a_malformed_query_string_answers_in_the_error_envelope() {
     let harness = Harness::new();
 
-    let (status, body) = harness.get_authed("/events?after=soon").await;
+    let (status, body) = harness.get("/events?after=soon").await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["code"], "bad_request");
@@ -215,7 +120,7 @@ async fn the_feed_can_be_narrowed_to_one_task() {
         .publish(ForgeEvent::TaskDeleted { task_id: 7 })
         .unwrap();
 
-    let (_, body) = harness.get_authed("/events?task=7").await;
+    let (_, body) = harness.get("/events?task=7").await;
 
     assert_eq!(body["events"].as_array().unwrap().len(), 1);
     assert_eq!(body["events"][0]["task_id"], 7);
@@ -228,12 +133,12 @@ async fn events_page_by_id_cursor() {
         harness.bus().publish(project_event(id)).unwrap();
     }
 
-    let (_, first) = harness.get_authed("/events?limit=2").await;
+    let (_, first) = harness.get("/events?limit=2").await;
     assert_eq!(first["events"].as_array().unwrap().len(), 2);
     assert_eq!(first["events"][0]["kind"], "project_registered");
 
     let cursor = first["next_after"].as_i64().unwrap();
-    let (_, rest) = harness.get_authed(&format!("/events?after={cursor}")).await;
+    let (_, rest) = harness.get(&format!("/events?after={cursor}")).await;
     assert_eq!(rest["events"].as_array().unwrap().len(), 1);
     assert_eq!(rest["events"][0]["project_id"], 3);
 }
@@ -342,7 +247,7 @@ async fn everything_on_the_socket_is_also_in_the_history() {
     harness.bus().publish(project_event(1)).unwrap();
     let streamed = next_event(&mut socket).await;
 
-    let (_, history) = harness.get_authed("/events").await;
+    let (_, history) = harness.get("/events").await;
     let stored: EventRecord = serde_json::from_value(history["events"][0].clone()).unwrap();
 
     assert_eq!(streamed, stored);
