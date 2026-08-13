@@ -2,10 +2,20 @@
 //!
 //! Everything here is wire-visible: the JSON produced by these types is the
 //! daemon's HTTP/WS contract, mirrored by hand in
-//! `apps/desktop/src/lib/api-types.ts` until we generate it.
+//! `apps/desktop/src/lib/api-types.ts`.
 
 mod adapter;
+mod entity;
+mod event;
+mod health;
 mod status;
+mod timestamp;
 
-pub use adapter::AdapterId;
-pub use status::AgentStatus;
+pub use adapter::{AdapterId, UnknownAdapterId};
+pub use entity::{task_branch_name, tmux_session_name, AdapterSettings, Project, Session, Task};
+pub use event::{
+    EventDecodeError, EventKind, EventRecord, ForgeEvent, StopReason, UnknownEventKind,
+};
+pub use health::{BinaryStatus, Health};
+pub use status::{AgentStatus, UnknownAgentStatus};
+pub use timestamp::{InvalidTimestamp, Timestamp};

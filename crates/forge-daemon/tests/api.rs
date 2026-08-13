@@ -1,0 +1,349 @@
+//! End-to-end checks of the HTTP/WS surface against an in-process daemon.
+
+use std::net::SocketAddr;
+
+use axum::body::{to_bytes, Body};
+use axum::http::{Request, StatusCode};
+use forge_core::{EventRecord, ForgeEvent};
+use forge_daemon::bus::Bus;
+use forge_daemon::config::Config;
+use forge_daemon::http::{router, AppState};
+use forge_daemon::store::Store;
+use forge_daemon::token::Token;
+use futures_util::StreamExt;
+use tower::ServiceExt;
+
+type Socket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// A daemon with a throwaway token and an in-memory database.
+struct Harness {
+    state: AppState,
+    token: String,
+    _temp: tempfile::TempDir,
+}
+
+impl Harness {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let token = Token::load_or_create(&temp.path().join("token")).unwrap();
+        let secret = token.expose().to_owned();
+        let store = Store::open_in_memory().unwrap();
+        let bus = Bus::new(store.clone());
+
+        Self {
+            state: AppState::new(bus, store, token, Config::default(), "0.1.0-test"),
+            token: secret,
+            _temp: temp,
+        }
+    }
+
+    fn bus(&self) -> &Bus {
+        &self.state.bus
+    }
+
+    async fn send(&self, request: Request<Body>) -> (StatusCode, serde_json::Value) {
+        let response = router(self.state.clone()).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+
+    async fn get(&self, uri: &str) -> (StatusCode, serde_json::Value) {
+        self.send(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+    }
+
+    async fn get_authed(&self, uri: &str) -> (StatusCode, serde_json::Value) {
+        self.send(
+            Request::builder()
+                .uri(uri)
+                .header("authorization", format!("Bearer {}", self.token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
+    /// Open a WebSocket and wait until its handler has really subscribed.
+    ///
+    /// The handshake completes before the upgraded task runs, so publishing
+    /// straight after a connect would otherwise race the subscription.
+    async fn connect(&self, addr: SocketAddr, query: &str) -> Socket {
+        let before = self.bus().subscriber_count();
+        let (socket, _) =
+            tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events?{query}"))
+                .await
+                .expect("the upgrade should be accepted");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while self.bus().subscriber_count() <= before {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "handler never subscribed"
+            );
+            tokio::task::yield_now().await;
+        }
+
+        socket
+    }
+
+    /// Bind a real socket, so WebSocket clients have something to connect to.
+    async fn serve(&self) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = router(self.state.clone());
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        addr
+    }
+}
+
+fn project_event(id: i64) -> ForgeEvent {
+    ForgeEvent::ProjectRegistered {
+        project_id: id,
+        name: format!("p{id}"),
+        path: format!("/repos/p{id}"),
+    }
+}
+
+/// Read one event frame, failing rather than hanging if none arrives.
+async fn next_event(socket: &mut Socket) -> EventRecord {
+    let message = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+        .await
+        .expect("an event should arrive")
+        .expect("the socket should stay open")
+        .expect("the frame should be readable");
+
+    serde_json::from_str(message.to_text().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn health_answers_without_a_token() {
+    let harness = Harness::new();
+
+    let (status, body) = harness.get("/health").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["version"], "0.1.0-test");
+    assert!(body["uptime_secs"].is_number());
+    assert!(body["machine"].is_string());
+    let names: Vec<&str> = body["binaries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["tmux", "git"]);
+}
+
+#[tokio::test]
+async fn every_other_endpoint_needs_the_right_token() {
+    let harness = Harness::new();
+
+    let (status, body) = harness.get("/events").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"]["code"], "unauthorized");
+
+    let (status, _) = harness
+        .send(
+            Request::builder()
+                .uri("/events")
+                .header("authorization", "Bearer not-the-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, _) = harness.get_authed("/events").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_rest_endpoint_refuses_a_token_in_the_url() {
+    let harness = Harness::new();
+
+    let (status, _) = harness
+        .get(&format!("/events?token={}", harness.token))
+        .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn unknown_paths_and_methods_answer_in_the_error_envelope() {
+    let harness = Harness::new();
+
+    let (status, body) = harness.get_authed("/projects").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "not_found");
+
+    let (status, body) = harness
+        .send(
+            Request::builder()
+                .method("POST")
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(body["error"]["code"], "method_not_allowed");
+}
+
+#[tokio::test]
+async fn a_malformed_query_string_answers_in_the_error_envelope() {
+    let harness = Harness::new();
+
+    let (status, body) = harness.get_authed("/events?after=soon").await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "bad_request");
+}
+
+#[tokio::test]
+async fn the_feed_can_be_narrowed_to_one_task() {
+    let harness = Harness::new();
+    harness.bus().publish(project_event(1)).unwrap();
+    harness
+        .bus()
+        .publish(ForgeEvent::TaskDeleted { task_id: 7 })
+        .unwrap();
+
+    let (_, body) = harness.get_authed("/events?task=7").await;
+
+    assert_eq!(body["events"].as_array().unwrap().len(), 1);
+    assert_eq!(body["events"][0]["task_id"], 7);
+}
+
+#[tokio::test]
+async fn events_page_by_id_cursor() {
+    let harness = Harness::new();
+    for id in 1..=3 {
+        harness.bus().publish(project_event(id)).unwrap();
+    }
+
+    let (_, first) = harness.get_authed("/events?limit=2").await;
+    assert_eq!(first["events"].as_array().unwrap().len(), 2);
+    assert_eq!(first["events"][0]["kind"], "project_registered");
+
+    let cursor = first["next_after"].as_i64().unwrap();
+    let (_, rest) = harness.get_authed(&format!("/events?after={cursor}")).await;
+    assert_eq!(rest["events"].as_array().unwrap().len(), 1);
+    assert_eq!(rest["events"][0]["project_id"], 3);
+}
+
+#[tokio::test]
+async fn a_websocket_receives_events_published_after_it_connects() {
+    let harness = Harness::new();
+    let addr = harness.serve().await;
+
+    let mut socket = harness
+        .connect(addr, &format!("token={}", harness.token))
+        .await;
+    // The handler subscribes during the upgrade; publishing immediately after a
+    // successful connect is enough to be seen.
+    let published = harness.bus().publish(project_event(1)).unwrap();
+
+    let received = next_event(&mut socket).await;
+    assert_eq!(received, published);
+}
+
+#[tokio::test]
+async fn a_websocket_with_a_cursor_backfills_before_going_live() {
+    let harness = Harness::new();
+    let addr = harness.serve().await;
+
+    let first = harness.bus().publish(project_event(1)).unwrap();
+    harness.bus().publish(project_event(2)).unwrap();
+
+    let mut socket = harness
+        .connect(addr, &format!("token={}&after={}", harness.token, first.id))
+        .await;
+
+    // The event published before the connection but after the cursor.
+    assert_eq!(next_event(&mut socket).await.event, project_event(2));
+
+    let live = harness.bus().publish(project_event(3)).unwrap();
+    let received = next_event(&mut socket).await;
+    assert_eq!(received, live);
+}
+
+#[tokio::test]
+async fn an_unauthenticated_websocket_upgrade_is_rejected() {
+    let harness = Harness::new();
+    let addr = harness.serve().await;
+
+    let result = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events")).await;
+
+    assert!(result.is_err(), "the upgrade should not be accepted");
+}
+
+#[tokio::test]
+async fn a_wrong_token_cannot_open_a_websocket() {
+    let harness = Harness::new();
+    let addr = harness.serve().await;
+
+    let result =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events?token=nope")).await;
+
+    assert!(result.is_err(), "the upgrade should not be accepted");
+}
+
+#[tokio::test]
+async fn two_viewers_both_see_every_event() {
+    let harness = Harness::new();
+    let addr = harness.serve().await;
+
+    let mut first = harness
+        .connect(addr, &format!("token={}", harness.token))
+        .await;
+    let mut second = harness
+        .connect(addr, &format!("token={}", harness.token))
+        .await;
+
+    let published = harness.bus().publish(project_event(1)).unwrap();
+
+    assert_eq!(next_event(&mut first).await, published);
+    assert_eq!(next_event(&mut second).await, published);
+}
+
+#[tokio::test]
+async fn closing_a_socket_leaves_the_other_viewer_alone() {
+    let harness = Harness::new();
+    let addr = harness.serve().await;
+
+    let mut leaving = harness
+        .connect(addr, &format!("token={}", harness.token))
+        .await;
+    let mut staying = harness
+        .connect(addr, &format!("token={}", harness.token))
+        .await;
+
+    leaving.close(None).await.unwrap();
+
+    let published = harness.bus().publish(project_event(1)).unwrap();
+    assert_eq!(next_event(&mut staying).await, published);
+}
+
+#[tokio::test]
+async fn everything_on_the_socket_is_also_in_the_history() {
+    let harness = Harness::new();
+    let addr = harness.serve().await;
+
+    let mut socket = harness
+        .connect(addr, &format!("token={}", harness.token))
+        .await;
+    harness.bus().publish(project_event(1)).unwrap();
+    let streamed = next_event(&mut socket).await;
+
+    let (_, history) = harness.get_authed("/events").await;
+    let stored: EventRecord = serde_json::from_value(history["events"][0].clone()).unwrap();
+
+    assert_eq!(streamed, stored);
+}

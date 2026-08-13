@@ -15,7 +15,7 @@
   --ring: oklch(0.62 0.15 295);
   --radius: 0.625rem;
 
-  /* Agent status (SPEC §5.2) — one hue per state, used everywhere. */
+  /* Agent status — one hue per state, used everywhere. */
   --status-idle: oklch(0.62 0.02 285);
   --status-working: oklch(0.62 0.15 250);
   --status-waiting: oklch(0.72 0.15 75);
