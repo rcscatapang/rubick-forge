@@ -106,6 +106,17 @@ The same pass is what "sessions survive a daemon restart" means in practice.
 There is nothing else to it: launchd restarts the daemon, the daemon asks tmux
 what is still running, and carries on.
 
+## Terminals
+
+Each viewer gets its own `tmux attach` in a pty the daemon owns, and raw bytes
+are proxied over a WebSocket. That is why a full TUI renders: nothing
+interprets the stream, it is the same bytes a terminal would receive.
+
+Closing the socket kills that attach and nothing else. A session outlives every
+viewer that ever watched it.
+
+See [api.md](api.md) for the frame protocol.
+
 ## Isolation while testing
 
 `TmuxRuntime::with_socket(label)` talks to a private tmux server under

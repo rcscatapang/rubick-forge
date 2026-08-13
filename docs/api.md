@@ -314,6 +314,53 @@ feed to one task.
 One JSON frame per event, same shape as an `/events` row. Takes `?token=`
 because a browser cannot set headers on the handshake.
 
+## Terminals
+
+### `WS /ws/sessions/:id/terminal?cols=&rows=&read_only=`
+
+A live terminal for one session. The daemon runs `tmux attach` in a pty of its
+own and proxies raw bytes both ways.
+
+| Frame | Direction | Meaning |
+|-------|-----------|---------|
+| Binary | daemon → client | Terminal output, verbatim |
+| Binary | client → daemon | Keystrokes, verbatim |
+| Text | client → daemon | A control message |
+
+Two control messages:
+
+```json
+{ "type": "resize", "cols": 132, "rows": 43 }
+{ "type": "read_only", "value": true }
+```
+
+Toggling read-only over the socket rather than reconnecting keeps what is on
+screen: retaking a terminal would lose it. An unreadable control message is
+ignored rather than fatal.
+
+The daemon pings every 20 seconds. A viewer whose machine sleeps or loses its
+network leaves a connection that never reads and never errors on write; the
+ping is what eventually fails, and failing is what reaps the pty.
+
+A viewer that falls far enough behind is disconnected rather than thinned.
+Dropping bytes would render as garbage, and blocking would back up into the
+tmux server and hurt everyone else on that session. Reconnecting redraws.
+
+`cols` and `rows` set the initial size so the first redraw is already right;
+they default to 80×24. `read_only=true` discards the client's keystrokes at
+the daemon, so it does not depend on the client behaving.
+
+Takes `?token=` — a browser cannot set headers on a handshake. The upgrade is
+refused outright for a session that does not exist or has already ended.
+
+**One attach per viewer.** Two windows on one session each get their own, and
+neither disturbs the other. Closing a socket detaches and reaps that pty; the
+session, and the agent inside it, are untouched.
+
+**Sizing.** tmux sizes a window to its *smallest* attached client — including
+a human attached in their own terminal. A small app window will crop what
+everyone sees, and there is nothing Forge can do about that from its side.
+
 ## Health
 
 ### `GET /health`
