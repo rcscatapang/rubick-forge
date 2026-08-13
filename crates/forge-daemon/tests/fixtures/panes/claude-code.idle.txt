@@ -1,0 +1,22 @@
+│   Opus 5 (1M context) with medi… · Claude Max ·    │ Added server-supplied Claude Code hook sup… │
+│   developer@example.com's Organization             │ /release-notes for more                     │
+│ /…/lnz_r4ps31z2x5rwv0ytxbm40000gn/T/tmp.u3qJXBnWLG │                                             │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ⚠ 1 MCP server needs authentication · run /mcp
+
+
+
+
+
+
+
+
+
+
+                                                                                 ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Try "how does <filepath> work?"
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  someone@Their-MacBook-Pro /private/var/folders/t5/lnz_r4ps31z2x5rwv0ytxbm40000gn/T/tmp.u3qJX…
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent

@@ -1,14 +1,18 @@
 //! Starting, stopping and re-adopting the sessions tasks run in.
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use forge_core::{tmux_session_name, AgentStatus, ForgeEvent, Project, Session, StopReason, Task};
 
+use crate::adapters;
+use crate::adapters::markers::tail_of;
+use crate::adapters::status::{Outcome, Tracker};
 use crate::bus::Bus;
 use crate::config::Config;
-use crate::runtime::SessionRuntime;
+use crate::runtime::{SessionRuntime, CAPTURE_LINES};
 use crate::store::{Store, StoreError, TaskPatch};
 
 /// Sessions the daemon owns are named `forge-<task-id>`, which is also the
@@ -18,11 +22,37 @@ pub const SESSION_PREFIX: &str = "forge-";
 /// How often a stop checks whether the agent has taken the hint.
 const GRACE_POLL: Duration = Duration::from_millis(100);
 
+/// How much of a pane goes into an event payload.
+///
+/// Enough to see the question being asked, and short enough to fit a
+/// notification. ANSI is already gone: tmux captures plain text unless asked
+/// otherwise.
+const PAYLOAD_LINES: usize = 12;
+const PAYLOAD_CHARS: usize = 800;
+
+/// The part of a pane worth showing a person, length-capped.
+fn pane_tail(pane: &str) -> String {
+    let tail = tail_of(pane, PAYLOAD_LINES);
+
+    let trimmed: Vec<&str> = tail.lines().skip_while(|line| line.is_empty()).collect();
+
+    let text = trimmed.join("\n");
+    if text.chars().count() > PAYLOAD_CHARS {
+        // Keep the end: the question is at the bottom.
+        let skip = text.chars().count() - PAYLOAD_CHARS;
+        return String::from("…") + &text.chars().skip(skip).collect::<String>();
+    }
+    text
+}
+
 pub struct SessionManager<R: SessionRuntime> {
     runtime: R,
     store: Store,
     bus: Bus,
     config: Arc<Config>,
+    /// What the poller believes about each live session, keyed by session id.
+    /// Deliberately not persisted: a restart re-derives it from the pane.
+    trackers: Mutex<HashMap<i64, Tracker>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -71,7 +101,32 @@ impl<R: SessionRuntime> SessionManager<R> {
             store,
             bus,
             config,
+            trackers: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Send text to a running agent as if it had been typed.
+    pub async fn send_instruction(
+        &self,
+        task_id: i64,
+        text: &str,
+    ) -> Result<(), SessionManagerError> {
+        let session = self
+            .store
+            .live_session(task_id)?
+            .ok_or(SessionManagerError::NotRunning(task_id))?;
+
+        // Through a paste buffer, then a separate Enter: the text may contain
+        // newlines and anything else, and none of it may be read as keys.
+        self.runtime
+            .paste(&session.tmux_name, text)
+            .await
+            .map_err(|err| SessionManagerError::Runtime(err.to_string()))?;
+
+        self.runtime
+            .send_keys(&session.tmux_name, &["Enter"])
+            .await
+            .map_err(|err| SessionManagerError::Runtime(err.to_string()))
     }
 
     pub fn runtime(&self) -> &R {
@@ -241,39 +296,229 @@ impl<R: SessionRuntime> SessionManager<R> {
         }
     }
 
-    /// Notice a session whose process has exited, without waiting for a boot.
+    /// Read every live session once and act on what it says.
     ///
-    /// `remain-on-exit` keeps the pane alive after its process dies, so an
-    /// agent that finished or crashed is still there to be asked how it went.
-    async fn sweep_dead_panes(&self) -> Result<usize, SessionManagerError> {
-        let mut ended = 0;
+    /// Ordered exactly as documented: a dead process decides the outcome
+    /// whatever the screen shows, then the adapter's markers are tried, and an
+    /// unrecognised screen keeps the current belief up to a staleness cap.
+    ///
+    /// One session's failure does not abandon the rest: whatever went wrong is
+    /// logged and the next session is read.
+    async fn read_sessions(&self) -> Result<usize, SessionManagerError> {
+        let mut examined = 0;
 
         for session in self.store.live_sessions()? {
-            let Ok(state) = self.runtime.pane_state(&session.tmux_name).await else {
-                continue;
-            };
-            if state.alive {
-                continue;
+            match self.read_session(&session).await {
+                Ok(()) => examined += 1,
+                Err(error) => {
+                    tracing::warn!(session = session.id, %error, "cannot read a session");
+                }
             }
-
-            // A non-zero exit is a crash, not a finish.
-            let status = match state.exit_code {
-                Some(0) | None => AgentStatus::Stopped,
-                Some(_) => AgentStatus::Error,
-            };
-
-            let _ = self.runtime.kill(&session.tmux_name).await;
-            self.close(&session, status, StopReason::Exited)?;
-            ended += 1;
         }
 
-        Ok(ended)
+        Ok(examined)
+    }
+
+    async fn read_session(&self, session: &Session) -> Result<(), SessionManagerError> {
+        let pane = self
+            .runtime
+            .pane_state(&session.tmux_name)
+            .await
+            .map_err(|err| SessionManagerError::Runtime(err.to_string()))?;
+
+        let outcome = self.examine(session, &pane).await?;
+
+        // The agent's process has gone. Its pane is still standing because
+        // `remain-on-exit` is what let us read how it ended, so take the
+        // session down before the row says it is over.
+        if outcome.process_ended {
+            if let Err(error) = self.runtime.kill(&session.tmux_name).await {
+                tracing::warn!(session = %session.tmux_name, %error, "cannot remove a finished session");
+            }
+        }
+
+        self.act_on(session, &outcome).await
+    }
+
+    /// Work out what the session's state is now.
+    async fn examine(
+        &self,
+        session: &Session,
+        pane: &crate::runtime::PaneState,
+    ) -> Result<Outcome, SessionManagerError> {
+        let patterns = self.patterns_for(session.task_id)?;
+
+        // Capturing is the expensive part of a poll, so it is skipped when the
+        // pane is dead — whose verdict does not depend on the screen — and
+        // when tmux says the pane has produced nothing since last time.
+        if !pane.alive {
+            let mut trackers = self.trackers();
+            let tracker = self.tracker_for(&mut trackers, session);
+            return Ok(tracker.poll(pane, None, patterns));
+        }
+
+        let activity = self
+            .runtime
+            .activity(&session.tmux_name)
+            .await
+            .ok()
+            .flatten();
+
+        {
+            let mut trackers = self.trackers();
+            let tracker = self.tracker_for(&mut trackers, session);
+            if tracker.is_unchanged_since(activity) {
+                return Ok(tracker.skipped());
+            }
+        }
+
+        let output = self
+            .runtime
+            .capture(&session.tmux_name, CAPTURE_LINES)
+            .await
+            .ok();
+
+        let mut trackers = self.trackers();
+        let tracker = self.tracker_for(&mut trackers, session);
+        tracker.saw_activity(activity);
+        Ok(tracker.poll(pane, output.as_deref(), patterns))
+    }
+
+    fn tracker_for<'a>(
+        &self,
+        trackers: &'a mut HashMap<i64, Tracker>,
+        session: &Session,
+    ) -> &'a mut Tracker {
+        trackers
+            .entry(session.id)
+            .or_insert_with(|| Tracker::new(session.status))
+    }
+
+    /// Persist what a reading means, then announce it.
+    ///
+    /// Writes come before events: a client that hears about a status and then
+    /// reads a different one from the API has been lied to.
+    async fn act_on(
+        &self,
+        session: &Session,
+        outcome: &Outcome,
+    ) -> Result<(), SessionManagerError> {
+        if outcome.process_ended {
+            self.close(session, outcome.status, StopReason::Exited)?;
+            self.report_ending(session, outcome)?;
+            return Ok(());
+        }
+
+        let Some(from) = outcome.changed_from else {
+            return Ok(());
+        };
+
+        self.store.set_session_status(session.id, outcome.status)?;
+        self.set_task_status(session.task_id, outcome.status)?;
+
+        self.bus.publish(ForgeEvent::StatusChanged {
+            task_id: session.task_id,
+            session_id: session.id,
+            from,
+            to: outcome.status,
+        })?;
+
+        if outcome.entered_waiting {
+            self.bus.publish(ForgeEvent::AgentWaiting {
+                task_id: session.task_id,
+                session_id: session.id,
+                tail: self.last_tail(session).await,
+            })?;
+        }
+
+        if outcome.status == AgentStatus::Error {
+            self.bus.publish(ForgeEvent::AgentError {
+                task_id: session.task_id,
+                session_id: session.id,
+                detail: self.last_tail(session).await,
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Say how a session ended, once its row is closed.
+    fn report_ending(
+        &self,
+        session: &Session,
+        outcome: &Outcome,
+    ) -> Result<(), SessionManagerError> {
+        if let Some(from) = outcome.changed_from {
+            self.bus.publish(ForgeEvent::StatusChanged {
+                task_id: session.task_id,
+                session_id: session.id,
+                from,
+                to: outcome.status,
+            })?;
+        }
+
+        match outcome.status {
+            AgentStatus::Error => {
+                self.bus.publish(ForgeEvent::AgentError {
+                    task_id: session.task_id,
+                    session_id: session.id,
+                    detail: format!("{} exited unexpectedly", session.tmux_name),
+                })?;
+            }
+            // A task that only ever sat at a prompt did not "finish"; saying
+            // so would notify the user about nothing happening.
+            _ if outcome
+                .changed_from
+                .is_some_and(|from| from != AgentStatus::Idle) =>
+            {
+                self.bus.publish(ForgeEvent::TaskFinished {
+                    task_id: session.task_id,
+                    session_id: session.id,
+                })?;
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    /// The pane as it last looked, for an event payload.
+    async fn last_tail(&self, session: &Session) -> String {
+        match self
+            .runtime
+            .capture(&session.tmux_name, CAPTURE_LINES)
+            .await
+        {
+            Ok(pane) => pane_tail(&pane),
+            Err(_) => String::new(),
+        }
+    }
+
+    /// The markers for whichever adapter a task runs.
+    fn patterns_for(
+        &self,
+        task_id: i64,
+    ) -> Result<&'static crate::adapters::markers::StatusPatterns, SessionManagerError> {
+        let task = self
+            .store
+            .task(task_id)?
+            .ok_or_else(|| StoreError::Corrupt(format!("task {task_id} is gone")))?;
+
+        Ok(adapters::adapter(task.adapter).status_patterns())
+    }
+
+    fn trackers(&self) -> std::sync::MutexGuard<'_, HashMap<i64, Tracker>> {
+        self.trackers.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn forget(&self, session_id: i64) {
+        self.trackers().remove(&session_id);
     }
 
     /// One pass of the watch loop.
     pub async fn poll(&self) -> Result<Reconciliation, SessionManagerError> {
         let found = self.reconcile().await?;
-        self.sweep_dead_panes().await?;
+        self.read_sessions().await?;
         Ok(found)
     }
 
@@ -284,7 +529,14 @@ impl<R: SessionRuntime> SessionManager<R> {
         status: AgentStatus,
         reason: StopReason,
     ) -> Result<Session, SessionManagerError> {
-        let ended = self.store.end_session(session.id, status)?;
+        // Somebody else may have closed it between reading and deciding; the
+        // row is theirs to announce, not ours.
+        if !self.store.close_session(session.id, status)? {
+            self.forget(session.id);
+            return Ok(self.store.session(session.id)?.unwrap_or(session.clone()));
+        }
+
+        let ended = self.store.session(session.id)?.unwrap_or(session.clone());
 
         self.set_task_status(session.task_id, status)?;
         self.bus.publish(ForgeEvent::SessionStopped {
@@ -292,6 +544,7 @@ impl<R: SessionRuntime> SessionManager<R> {
             session_id: session.id,
             reason,
         })?;
+        self.forget(session.id);
 
         Ok(ended)
     }

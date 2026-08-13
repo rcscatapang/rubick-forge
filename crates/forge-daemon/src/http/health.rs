@@ -31,7 +31,8 @@ impl BinaryCache {
 
         // Two racing requests may both probe; both write the same answer, so
         // the only cost is one redundant pair of processes.
-        let probed = binaries::probe_required().await;
+        let mut probed = binaries::probe_required().await;
+        probed.extend(crate::adapters::probe_all().await);
         *self.lock() = Some((Instant::now(), probed.clone()));
         probed
     }

@@ -73,10 +73,48 @@ pub struct SessionList {
     pub sessions: Vec<Session>,
 }
 
-/// An empty command starts the runtime's default shell in the task's working
-/// directory, which is attachable and assumes no particular agent.
-fn default_command() -> Vec<String> {
-    Vec::new()
+/// The argv for a task's agent, built from its adapter and the project's
+/// settings for that adapter.
+fn launch_command(task: &Task, project: &Project) -> Vec<String> {
+    let adapter = crate::adapters::adapter(task.adapter);
+    let settings = project
+        .adapter_settings
+        .get(task.adapter)
+        .cloned()
+        .unwrap_or_default();
+
+    adapter.launch_command(task, &settings)
+}
+
+/// Long enough for a paragraph of direction, short enough that a client
+/// cannot paste a file into someone's terminal.
+const MAX_INSTRUCTION_CHARS: usize = 8_000;
+
+#[derive(Debug, Deserialize)]
+pub struct InstructionRequest {
+    pub text: String,
+}
+
+/// Type something into a running agent.
+pub async fn instruction(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<i64>,
+    Json(request): Json<InstructionRequest>,
+) -> ApiResult<StatusCode> {
+    load(&state, id)?;
+
+    if request.text.trim().is_empty() {
+        return Err(ApiError::bad_request("an instruction needs some text"));
+    }
+    if request.text.chars().count() > MAX_INSTRUCTION_CHARS {
+        return Err(ApiError::bad_request(format!(
+            "an instruction may be at most {MAX_INSTRUCTION_CHARS} characters"
+        )));
+    }
+
+    state.sessions.send_instruction(id, &request.text).await?;
+
+    Ok(StatusCode::ACCEPTED)
 }
 
 /// Every run of a task, oldest first.
@@ -98,12 +136,42 @@ pub async fn start(
     let task = load(&state, id)?;
     let project = project_of(&state, &task)?;
 
+    // The runtime is checked first, so a machine with no tmux says so however
+    // many agent CLIs it is missing as well.
+    state.sessions.preflight().await?;
+    require_agent(&task).await?;
+
     let session = state
         .sessions
-        .start(&task, &project, &default_command())
+        .start(&task, &project, &launch_command(&task, &project))
         .await?;
 
     Ok((StatusCode::CREATED, Json(session)))
+}
+
+/// Refuse to start when the agent's CLI is not there, and say which one.
+async fn require_agent(task: &Task) -> ApiResult<()> {
+    let check = crate::adapters::adapter(task.adapter).binary_check().await;
+    match unusable_agent(task.adapter, &check) {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+/// The error for an agent CLI that cannot be used, or `None` when it can.
+fn unusable_agent(adapter: AdapterId, check: &forge_core::BinaryStatus) -> Option<ApiError> {
+    if check.ok {
+        return None;
+    }
+
+    Some(ApiError::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "adapter_unavailable",
+        check
+            .detail
+            .clone()
+            .unwrap_or_else(|| format!("`{}` is not usable", adapter.binary_name())),
+    ))
 }
 
 pub async fn stop(
@@ -122,9 +190,12 @@ pub async fn restart(
     let task = load(&state, id)?;
     let project = project_of(&state, &task)?;
 
+    state.sessions.preflight().await?;
+    require_agent(&task).await?;
+
     let session = state
         .sessions
-        .restart(&task, &project, &default_command())
+        .restart(&task, &project, &launch_command(&task, &project))
         .await?;
 
     Ok((StatusCode::CREATED, Json(session)))
@@ -449,6 +520,29 @@ impl From<TaskError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_usable_agent_is_no_obstacle() {
+        let check = forge_core::BinaryStatus {
+            name: "claude".into(),
+            path: Some("/usr/local/bin/claude".into()),
+            version: Some("2.1.0".into()),
+            ok: true,
+            detail: None,
+        };
+
+        assert!(unusable_agent(AdapterId::ClaudeCode, &check).is_none());
+    }
+
+    #[test]
+    fn a_missing_agent_is_a_503_that_names_the_cli() {
+        let check = forge_core::BinaryStatus::missing("claude");
+
+        let err = unusable_agent(AdapterId::ClaudeCode, &check).unwrap();
+
+        assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(err.message().contains("claude"), "{}", err.message());
+    }
 
     #[test]
     fn a_missing_task_or_project_is_a_404() {

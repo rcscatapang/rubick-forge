@@ -60,7 +60,17 @@ impl Store {
     /// Already-ended sessions are left alone, so a session that vanished and
     /// is then stopped by hand keeps the time it actually ended.
     pub fn end_session(&self, id: i64, status: AgentStatus) -> Result<Session, SessionError> {
-        self.with(|conn| {
+        self.close_session(id, status)?;
+        self.session(id)?.ok_or(SessionError::NotFound(id))
+    }
+
+    /// End a session only if it is still live, saying whether it was.
+    ///
+    /// Two things can decide a session is over at once — a stop request and a
+    /// poll that sees the process gone — and only one of them should announce
+    /// it.
+    pub fn close_session(&self, id: i64, status: AgentStatus) -> Result<bool, SessionError> {
+        let changed = self.with(|conn| {
             conn.execute(
                 "UPDATE sessions SET status = ?2, ended_at = ?3
                  WHERE id = ?1 AND ended_at IS NULL",
@@ -69,7 +79,7 @@ impl Store {
             .map_err(StoreError::Query)
         })?;
 
-        self.session(id)?.ok_or(SessionError::NotFound(id))
+        Ok(changed > 0)
     }
 
     pub fn set_session_pid(&self, id: i64, pid: Option<i64>) -> Result<(), StoreError> {
@@ -284,6 +294,22 @@ mod tests {
         assert!(ended.ended_at.is_some());
         assert!(!ended.is_live());
         assert_eq!(store.live_session(task_id).unwrap(), None);
+    }
+
+    #[test]
+    fn only_the_first_close_reports_having_closed_it() {
+        let (store, task_id) = store_with_task();
+        let session = store
+            .start_session(task_id, &tmux_session_name(task_id))
+            .unwrap();
+
+        assert!(store
+            .close_session(session.id, AgentStatus::Stopped)
+            .unwrap());
+        assert!(
+            !store.close_session(session.id, AgentStatus::Error).unwrap(),
+            "the second caller must not announce it too"
+        );
     }
 
     #[test]

@@ -24,6 +24,7 @@ person as-is; raw stderr and SQL never appear in it.
 | `conflict` | 409 | The request contradicts current state (duplicate, or a guard) |
 | `git_missing` | 503 | `git` is not on the daemon's `PATH` |
 | `runtime_unavailable` | 503 | tmux is missing, too old, or refusing to work |
+| `adapter_unavailable` | 503 | the task's agent CLI is not on the daemon's `PATH` |
 | `internal` | 500 | The daemon's own fault; the detail is in its log |
 
 ## Projects
@@ -118,6 +119,27 @@ cheap however many are registered.
 Every field degrades rather than failing. A detached HEAD has a `null` branch;
 a repository with no commits has a `null` head; a branch with no upstream has
 `null` for `upstream`, `ahead` and `behind`. `dirty` counts untracked files.
+
+## Adapters
+
+### `GET /adapters`
+
+What this daemon can drive, and how each one can be configured.
+
+```json
+{ "adapters": [ {
+    "id": "claude-code",
+    "name": "Claude Code",
+    "binary": { "name": "claude", "path": "…", "version": "…", "ok": true, "detail": null },
+    "settings": [ { "key": "model", "kind": "text", "description": "Model to run, passed as --model." } ]
+} ] }
+```
+
+`settings` is what a project's `adapter_settings` for that adapter may
+contain — enough to render a form without hard-coding it. A documented key
+must be the kind it says; undocumented keys are stored and returned untouched.
+
+See [adapters.md](adapters.md).
 
 ## Tasks
 
@@ -243,8 +265,11 @@ live one.
 
 `201` with the new session. Emits `session_started`.
 
-`409` when the task is already running. `503` when tmux is missing or too old —
-the message says which, and `/health` has the detail.
+The session runs the task's adapter — see [adapters.md](adapters.md) — with the
+project's settings for it and the task's initial prompt.
+
+`409` when the task is already running. `503` when tmux or the agent CLI is
+missing or unusable; the message says which, and `/health` has the detail.
 
 ### `POST /tasks/:id/stop`
 
@@ -257,6 +282,18 @@ The daemon sends `C-c`, waits up to three seconds, then kills the session.
 
 `201` with a second session. The first is stopped and kept in the task's
 history rather than reused.
+
+### `POST /tasks/:id/instruction`
+
+```json
+{ "text": "Also update the tests" }
+```
+
+`202` when it has been typed into the running agent. The text is sent through
+a paste buffer and then Enter, so newlines stay newlines and nothing in it is
+read as a key or reaches a shell.
+
+`409` when the task is not running, `400` when the text is empty.
 
 ## Events
 
@@ -295,5 +332,7 @@ Unauthenticated, so a client can tell "daemon down" from "wrong token".
 }
 ```
 
-A missing binary is a warning, never a crash: the daemon still serves history
-and settings, it just cannot run agents. Results are cached for 30 seconds.
+Lists the tools the daemon needs — `tmux`, `git` — then every agent CLI it can
+drive. A missing binary is a warning, never a crash: the daemon still serves
+history and settings, it just cannot start the sessions that need it. Results
+are cached for 30 seconds.

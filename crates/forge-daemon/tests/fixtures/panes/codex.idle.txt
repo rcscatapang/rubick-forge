@@ -1,0 +1,12 @@
+
+  Tip: Run codex app to open the Desktop app (it installs on macOS if needed).
+
+⚠ MCP client for `laravel-boost` failed to start: MCP startup failed: handshaking with MCP server
+  failed: connection closed: initialize response
+
+⚠ MCP startup incomplete (failed: laravel-boost)
+
+
+› Use /skills to list available skills
+
+  gpt-5.6-sol medium · /private/var/folders/t5/lnz_r4ps31z2x5rwv0ytxbm40000gn/T/tmp.5xNgvOWxpu · ma…

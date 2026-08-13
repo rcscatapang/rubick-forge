@@ -72,7 +72,8 @@ cd apps/desktop && npm run typecheck && npm test && npm run build
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the one architectural rule.
 [docs/daemon.md](docs/daemon.md) covers the state directory, config, token and
 launchd commands; [docs/runtime.md](docs/runtime.md) the tmux session model and
-recovery; [docs/api.md](docs/api.md) the HTTP/WS surface.
+recovery; [docs/adapters.md](docs/adapters.md) how each agent CLI is launched
+and read; [docs/api.md](docs/api.md) the HTTP/WS surface.
 
 ## Security posture
 

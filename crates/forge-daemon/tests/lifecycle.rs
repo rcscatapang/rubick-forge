@@ -52,10 +52,35 @@ impl Fixture {
         }
     }
 
+    /// Start the session running a plain shell rather than the task's real
+    /// agent CLI: what these tests exercise is the runtime and the poller, not
+    /// Claude Code's interface.
     async fn start(&self) -> (StatusCode, Value) {
-        self.harness
-            .post(&format!("/tasks/{}/start", self.task_id), json!({}))
+        self.start_running(&[]).await
+    }
+
+    async fn start_running(&self, command: &[String]) -> (StatusCode, Value) {
+        let task = self.harness.store().task(self.task_id).unwrap().unwrap();
+        let project = self
+            .harness
+            .store()
+            .project(task.project_id)
+            .unwrap()
+            .unwrap();
+
+        match self
+            .harness
+            .state
+            .sessions
+            .start(&task, &project, command)
             .await
+        {
+            Ok(session) => (StatusCode::CREATED, serde_json::to_value(session).unwrap()),
+            Err(err) => (
+                StatusCode::CONFLICT,
+                json!({ "error": { "message": err.to_string() } }),
+            ),
+        }
     }
 
     async fn stop(&self) -> (StatusCode, Value) {
@@ -119,47 +144,36 @@ async fn starting_a_task_creates_a_session_in_its_worktree() {
 #[tokio::test]
 async fn a_session_starts_in_the_tasks_working_directory() {
     let fixture = Fixture::new().await;
-    fixture.start().await;
 
-    let task = fixture.task().await;
-    let worktree = task["worktree_path"].as_str().unwrap();
+    // The command reports its own directory, rather than asking tmux later:
+    // an interactive shell's startup files may `cd` somewhere else, which
+    // says nothing about where the session was started.
+    fixture
+        .start_running(&[
+            "/bin/sh".into(),
+            "-c".into(),
+            "pwd > where.txt; sleep 30".into(),
+        ])
+        .await;
 
-    // The pane's own idea of where it is, asked of tmux directly. It settles
-    // a moment after the pane starts, so poll rather than assume.
+    let worktree = fixture.task().await["worktree_path"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let recorded = std::path::Path::new(&worktree).join("where.txt");
+
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let reported = loop {
-        let output = std::process::Command::new("tmux")
-            .args([
-                "-L",
-                &fixture.harness.tmux_label,
-                "display-message",
-                "-p",
-                "-t",
-                &fixture.tmux_name(),
-                "#{pane_current_path}",
-            ])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "tmux could not report the pane's path: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        let reported = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if !reported.is_empty() {
-            break reported;
-        }
+    while !recorded.exists() {
         assert!(
             std::time::Instant::now() < deadline,
-            "the pane never reported a path"
+            "the session never reported where it started"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
-    };
+    }
 
     assert_eq!(
-        std::fs::canonicalize(&reported).unwrap(),
-        std::fs::canonicalize(worktree).unwrap()
+        std::fs::canonicalize(std::fs::read_to_string(&recorded).unwrap().trim()).unwrap(),
+        std::fs::canonicalize(&worktree).unwrap()
     );
 }
 
@@ -210,12 +224,27 @@ async fn restarting_gives_the_task_a_second_session_not_a_reused_one() {
     let fixture = Fixture::new().await;
     let (_, first) = fixture.start().await;
 
-    let (status, second) = fixture
+    let task = fixture
         .harness
-        .post(&format!("/tasks/{}/restart", fixture.task_id), json!({}))
-        .await;
+        .store()
+        .task(fixture.task_id)
+        .unwrap()
+        .unwrap();
+    let project = fixture
+        .harness
+        .store()
+        .project(task.project_id)
+        .unwrap()
+        .unwrap();
+    let second = fixture
+        .harness
+        .state
+        .sessions
+        .restart(&task, &project, &[])
+        .await
+        .unwrap();
+    let second = serde_json::to_value(second).unwrap();
 
-    assert_eq!(status, StatusCode::CREATED, "{second}");
     assert_ne!(second["id"], first["id"]);
     assert!(fixture.session_exists().await);
 
@@ -232,13 +261,27 @@ async fn restarting_gives_the_task_a_second_session_not_a_reused_one() {
 #[tokio::test]
 async fn restarting_something_stopped_just_starts_it() {
     let fixture = Fixture::new().await;
-
-    let (status, session) = fixture
+    let task = fixture
         .harness
-        .post(&format!("/tasks/{}/restart", fixture.task_id), json!({}))
-        .await;
+        .store()
+        .task(fixture.task_id)
+        .unwrap()
+        .unwrap();
+    let project = fixture
+        .harness
+        .store()
+        .project(task.project_id)
+        .unwrap()
+        .unwrap();
 
-    assert_eq!(status, StatusCode::CREATED, "{session}");
+    fixture
+        .harness
+        .state
+        .sessions
+        .restart(&task, &project, &[])
+        .await
+        .unwrap();
+
     assert!(fixture.session_exists().await);
 }
 
@@ -595,10 +638,274 @@ async fn a_task_without_a_worktree_runs_in_the_repository_root() {
 }
 
 #[tokio::test]
+async fn an_instruction_is_typed_into_the_running_agent() {
+    let fixture = Fixture::new().await;
+    fixture.start().await;
+
+    let worktree = fixture.task().await["worktree_path"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let out = std::path::Path::new(&worktree).join("received.txt");
+    let runtime = fixture.harness.state.sessions.runtime();
+
+    // A pane that writes down whatever it is told, verbatim, and says when it
+    // is ready to be told.
+    let ready = std::path::Path::new(&worktree).join("ready.txt");
+    runtime
+        .paste(
+            &fixture.tmux_name(),
+            &format!("touch {}; cat > {}\n", ready.display(), out.display()),
+        )
+        .await
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !ready.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the pane never started"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Quotes, a subshell, a semicolon, a tmux key name, and a newline: every
+    // one of them means something to something, and all of it is data.
+    let instruction = "Fix $(whoami)'s \"bug\"; C-c\nand keep going";
+    let (status, _) = fixture
+        .harness
+        .post(
+            &format!("/tasks/{}/instruction", fixture.task_id),
+            json!({ "text": instruction }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    runtime
+        .send_keys(&fixture.tmux_name(), &["C-d"])
+        .await
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let received = std::fs::read_to_string(&out).unwrap_or_default();
+        if received.contains("and keep going") {
+            // Every character survived: the subshell never ran, the semicolon
+            // split nothing, and `C-c` stayed three characters rather than
+            // becoming an interrupt.
+            assert!(
+                received.contains("Fix $(whoami)'s \"bug\"; C-c"),
+                "got {received:?}"
+            );
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "nothing was received: {received:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn an_instruction_to_a_task_that_is_not_running_is_refused() {
+    let fixture = Fixture::new().await;
+
+    let (status, body) = fixture
+        .harness
+        .post(
+            &format!("/tasks/{}/instruction", fixture.task_id),
+            json!({ "text": "hello" }),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not running"));
+}
+
+#[tokio::test]
+async fn an_empty_instruction_is_refused() {
+    let fixture = Fixture::new().await;
+    fixture.start().await;
+
+    let (status, _) = fixture
+        .harness
+        .post(
+            &format!("/tasks/{}/instruction", fixture.task_id),
+            json!({ "text": "" }),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_status_change_is_announced_with_its_before_and_after() {
+    let fixture = Fixture::new().await;
+    // A pane whose text the claude-code markers read as "working".
+    fixture
+        .start_running(&[
+            "/bin/sh".into(),
+            "-c".into(),
+            "printf 'esc to interrupt\\n'; sleep 30".into(),
+        ])
+        .await;
+
+    poll_until(&fixture, "saw it working", async || {
+        fixture.task().await["status"] == "working"
+    })
+    .await;
+
+    let (_, feed) = fixture
+        .harness
+        .get(&format!("/events?task={}", fixture.task_id))
+        .await;
+    let changed = feed["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["kind"] == "status_changed")
+        .expect("a status_changed event");
+
+    assert_eq!(changed["from"], "idle");
+    assert_eq!(changed["to"], "working");
+    assert_eq!(changed["task_id"], fixture.task_id);
+}
+
+#[tokio::test]
+async fn entering_waiting_announces_it_once_with_a_readable_tail() {
+    let fixture = Fixture::new().await;
+    fixture
+        .start_running(&[
+            "/bin/sh".into(),
+            "-c".into(),
+            "printf 'Do you want to make this edit?\\n'; sleep 30".into(),
+        ])
+        .await;
+
+    poll_until(&fixture, "saw it waiting", async || {
+        fixture.task().await["status"] == "waiting"
+    })
+    .await;
+
+    // Several more passes must not restack the notification.
+    for _ in 0..3 {
+        fixture.harness.state.sessions.poll().await.unwrap();
+    }
+
+    let (_, feed) = fixture
+        .harness
+        .get(&format!("/events?task={}", fixture.task_id))
+        .await;
+    let waiting: Vec<&Value> = feed["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "agent_waiting")
+        .collect();
+
+    assert_eq!(waiting.len(), 1, "one notification per entry into waiting");
+    assert!(
+        waiting[0]["tail"]
+            .as_str()
+            .unwrap()
+            .contains("Do you want to make this edit?"),
+        "the tail should say what is being asked: {}",
+        waiting[0]["tail"]
+    );
+}
+
+#[tokio::test]
+async fn an_agent_that_was_working_and_then_exits_reports_the_task_finished() {
+    let fixture = Fixture::new().await;
+    fixture
+        .start_running(&[
+            "/bin/sh".into(),
+            "-c".into(),
+            "printf 'esc to interrupt\\n'; sleep 1".into(),
+        ])
+        .await;
+
+    poll_until(&fixture, "saw it working", async || {
+        fixture.task().await["status"] == "working"
+    })
+    .await;
+    poll_until(&fixture, "saw it finish", async || {
+        fixture.task().await["status"] == "stopped"
+    })
+    .await;
+
+    let kinds = fixture.event_kinds().await;
+    assert!(kinds.contains(&"task_finished".to_owned()), "{kinds:?}");
+}
+
+#[tokio::test]
+async fn a_task_that_only_ever_sat_at_a_prompt_does_not_claim_to_have_finished() {
+    let fixture = Fixture::new().await;
+    fixture
+        .start_running(&["/bin/sh".into(), "-c".into(), "exit 0".into()])
+        .await;
+
+    poll_until(&fixture, "saw it stop", async || {
+        fixture.task().await["status"] == "stopped"
+    })
+    .await;
+
+    let kinds = fixture.event_kinds().await;
+    assert!(
+        !kinds.contains(&"task_finished".to_owned()),
+        "nothing happened, so nothing finished: {kinds:?}"
+    );
+    assert!(kinds.contains(&"session_stopped".to_owned()));
+}
+
+#[tokio::test]
+async fn an_error_on_screen_does_not_take_the_session_down() {
+    let fixture = Fixture::new().await;
+    fixture
+        .start_running(&[
+            "/bin/sh".into(),
+            "-c".into(),
+            "printf 'API Error: overloaded\\n'; sleep 30".into(),
+        ])
+        .await;
+
+    poll_until(&fixture, "saw the error", async || {
+        fixture.task().await["status"] == "error"
+    })
+    .await;
+
+    assert!(
+        fixture.session_exists().await,
+        "an unhappy agent is still a running agent"
+    );
+    let (_, history) = fixture
+        .harness
+        .get(&format!("/tasks/{}/sessions", fixture.task_id))
+        .await;
+    assert!(
+        history["sessions"][0]["ended_at"].is_null(),
+        "its session is still open"
+    );
+    assert!(fixture
+        .event_kinds()
+        .await
+        .contains(&"agent_error".to_owned()));
+}
+
+#[tokio::test]
 async fn the_session_routes_need_a_token() {
     let harness = Harness::new();
 
-    for uri in ["/tasks/1/start", "/tasks/1/stop", "/tasks/1/restart"] {
+    for uri in [
+        "/tasks/1/start",
+        "/tasks/1/stop",
+        "/tasks/1/restart",
+        "/tasks/1/instruction",
+    ] {
         assert_eq!(
             harness.unauthenticated("POST", uri).await,
             StatusCode::UNAUTHORIZED,
