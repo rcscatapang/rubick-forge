@@ -73,7 +73,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the one architectural rule.
 [docs/daemon.md](docs/daemon.md) covers the state directory, config, token and
 launchd commands; [docs/runtime.md](docs/runtime.md) the tmux session model and
 recovery; [docs/adapters.md](docs/adapters.md) how each agent CLI is launched
-and read; [docs/api.md](docs/api.md) the HTTP/WS surface.
+and read; [docs/app.md](docs/app.md) what the desktop app does and does not
+hold; [docs/api.md](docs/api.md) the HTTP/WS surface.
 
 ## Security posture
 

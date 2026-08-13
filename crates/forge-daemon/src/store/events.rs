@@ -26,6 +26,11 @@ pub struct Query {
     pub limit: Option<usize>,
     /// Only events about this task.
     pub task_id: Option<i64>,
+    /// Take the newest events rather than the oldest.
+    ///
+    /// A feed wants the last thing that happened; paging from the beginning of
+    /// history would freeze it once history outgrew one page.
+    pub newest: bool,
 }
 
 impl Store {
@@ -35,11 +40,15 @@ impl Store {
 
         self.with(|conn| {
             let mut stmt = conn
-                .prepare(
+                .prepare(if query.newest {
                     "SELECT id, ts, kind, payload FROM events
                      WHERE id > ?1 AND (?2 IS NULL OR task_id = ?2)
-                     ORDER BY id LIMIT ?3",
-                )
+                     ORDER BY id DESC LIMIT ?3"
+                } else {
+                    "SELECT id, ts, kind, payload FROM events
+                     WHERE id > ?1 AND (?2 IS NULL OR task_id = ?2)
+                     ORDER BY id LIMIT ?3"
+                })
                 .map_err(StoreError::Query)?;
 
             let rows = stmt
@@ -60,6 +69,11 @@ impl Store {
             for row in rows {
                 let (id, ts, kind, payload) = row.map_err(StoreError::Query)?;
                 events.push(decode(id, &ts, &kind, &payload)?);
+            }
+
+            // Whichever end they came from, a page reads oldest first.
+            if query.newest {
+                events.reverse();
             }
 
             Ok(EventPage {
@@ -242,6 +256,52 @@ mod tests {
 
         let page = store.events(Query::default()).unwrap();
         assert_eq!(page.events.len(), 1);
+    }
+
+    #[test]
+    fn the_newest_page_is_the_end_of_history_still_in_order() {
+        let store = store();
+        for id in 1..=5 {
+            store.append_event(&project_event(id)).unwrap();
+        }
+
+        let page = store
+            .events(Query {
+                limit: Some(2),
+                newest: true,
+                ..Query::default()
+            })
+            .unwrap();
+
+        let ids: Vec<i64> = page.events.iter().map(|record| record.id).collect();
+        assert_eq!(ids, [4, 5], "the last two, oldest first");
+        assert_eq!(page.next_after, Some(5));
+    }
+
+    #[test]
+    fn the_newest_page_composes_with_the_task_filter() {
+        let store = store();
+        store.append_event(&project_event(1)).unwrap();
+        for _ in 0..3 {
+            store
+                .append_event(&ForgeEvent::TaskDeleted { task_id: 7 })
+                .unwrap();
+        }
+
+        let page = store
+            .events(Query {
+                task_id: Some(7),
+                limit: Some(2),
+                newest: true,
+                ..Query::default()
+            })
+            .unwrap();
+
+        assert_eq!(page.events.len(), 2);
+        assert!(page
+            .events
+            .iter()
+            .all(|record| record.event.task_id() == Some(7)));
     }
 
     #[test]

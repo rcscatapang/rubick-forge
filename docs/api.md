@@ -299,15 +299,19 @@ read as a key or reaches a shell.
 
 See [daemon.md](daemon.md) for the cursor semantics.
 
-### `GET /events?after=<id>&limit=<n>&task=<id>`
+### `GET /events?after=<id>&limit=<n>&task=<id>&newest=<bool>`
 
 ```json
 { "events": [ { "id": 1, "ts": "…", "kind": "project_registered", "…": "…" } ],
   "next_after": 1 }
 ```
 
-Oldest first. `limit` defaults to 100 and is capped at 500. `task` narrows the
-feed to one task.
+Oldest first, whichever end the page came from. `limit` defaults to 100 and is
+capped at 500. `task` narrows the feed to one task.
+
+`newest=true` takes the *end* of history rather than its beginning — what a
+feed wants. Paging forward from the first event ever recorded freezes a feed
+once there is more than one page of history.
 
 ### `WS /ws/events?after=<id>&task=<id>`
 

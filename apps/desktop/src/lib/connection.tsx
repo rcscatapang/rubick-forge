@@ -1,6 +1,19 @@
-import { createContext, useContext, useMemo, type ReactNode } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 
 import { DEFAULT_DAEMON_URL, type DaemonConnection } from "@/lib/daemon";
+
+interface Connected {
+  connection: DaemonConnection;
+  /** Adopt a new daemon or token, taking effect immediately. */
+  connect: (connection: DaemonConnection) => void;
+}
 
 /**
  * Where this window's daemon is.
@@ -8,7 +21,7 @@ import { DEFAULT_DAEMON_URL, type DaemonConnection } from "@/lib/daemon";
  * The app holds no state of its own beyond this: everything else it shows is
  * read from the daemon.
  */
-const DaemonContext = createContext<DaemonConnection | null>(null);
+const DaemonContext = createContext<Connected | null>(null);
 
 const TOKEN_KEY = "forge.daemon.token";
 const URL_KEY = "forge.daemon.url";
@@ -21,7 +34,7 @@ export function storedConnection(): DaemonConnection {
   };
 }
 
-export function rememberConnection(connection: DaemonConnection) {
+function remember(connection: DaemonConnection) {
   localStorage.setItem(URL_KEY, connection.url);
   localStorage.setItem(TOKEN_KEY, connection.token);
 }
@@ -33,15 +46,32 @@ export function DaemonProvider({
   connection?: DaemonConnection;
   children: ReactNode;
 }) {
-  const value = useMemo(() => connection ?? storedConnection(), [connection]);
+  const [current, setCurrent] = useState(() => connection ?? storedConnection());
+
+  // State, not just storage: a token written to disk that the running app does
+  // not pick up leaves it authenticating with the old one until it restarts.
+  const connect = useCallback((next: DaemonConnection) => {
+    remember(next);
+    setCurrent(next);
+  }, []);
+
+  const value = useMemo(() => ({ connection: current, connect }), [current, connect]);
 
   return <DaemonContext.Provider value={value}>{children}</DaemonContext.Provider>;
 }
 
-export function useDaemon(): DaemonConnection {
-  const connection = useContext(DaemonContext);
-  if (!connection) {
+function connected(): Connected {
+  const value = useContext(DaemonContext);
+  if (!value) {
     throw new Error("useDaemon must be used inside a DaemonProvider");
   }
-  return connection;
+  return value;
+}
+
+export function useDaemon(): DaemonConnection {
+  return connected().connection;
+}
+
+export function useConnect(): (connection: DaemonConnection) => void {
+  return connected().connect;
 }
