@@ -5,6 +5,7 @@ pub mod error;
 mod events;
 mod extract;
 mod health;
+mod projects;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -58,6 +59,14 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/events", get(events::list))
         .route("/ws/events", get(events::stream))
+        .route("/projects", get(projects::list).post(projects::register))
+        .route(
+            "/projects/{id}",
+            get(projects::get)
+                .patch(projects::patch)
+                .delete(projects::delete),
+        )
+        .route("/projects/{id}/git", get(projects::git_status))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_token,

@@ -1,0 +1,159 @@
+# The daemon API
+
+Everything the desktop app can do, it does over this. See
+[daemon.md](daemon.md) for the token, the port and the state directory.
+
+Every endpoint except `GET /health` needs `Authorization: Bearer <token>`.
+
+## Errors
+
+Every failure — including unknown paths, wrong methods and malformed query
+strings — comes back in one envelope. `message` is written to be shown to a
+person as-is; raw stderr and SQL never appear in it.
+
+```json
+{ "error": { "code": "not_found", "message": "there is no project with id 7" } }
+```
+
+| `code` | Status | Means |
+|--------|--------|-------|
+| `unauthorized` | 401 | Missing or wrong bearer token |
+| `bad_request` | 400 | The request is malformed, or names something git does not have |
+| `not_found` | 404 | No such entity, or no such endpoint |
+| `method_not_allowed` | 405 | The endpoint exists but not for this method |
+| `conflict` | 409 | The request contradicts current state (duplicate, or a guard) |
+| `git_missing` | 503 | `git` is not on the daemon's `PATH` |
+| `internal` | 500 | The daemon's own fault; the detail is in its log |
+
+## Projects
+
+A project is a registered git repository — the anchor every task hangs off.
+Registering one reads the repository; it never writes to it, and removing a
+project leaves the repository untouched.
+
+### `GET /projects`
+
+```json
+{ "projects": [ { "id": 1, "name": "forge", "…": "…" } ] }
+```
+
+In registration order.
+
+### `POST /projects`
+
+```json
+{
+  "path": "/Users/you/code/forge",
+  "name": "forge",
+  "adapter_settings": { "claude-code": { "model": "opus" } }
+}
+```
+
+Only `path` is required.
+
+- `path` may be any directory inside the repository; it is resolved to the
+  repository root and stored canonical. Registering `/repo` and `/repo/src`
+  therefore collides, which is the intent — they are one repository.
+- `name` defaults to the repository directory's own name.
+- `adapter_settings` is per-adapter configuration the daemon stores but does
+  not interpret. Keys must be known adapter ids, each value must be an object,
+  and each setting must be a string, number or boolean — they become
+  command-line flags. Unrecognised keys inside an adapter are kept as given.
+
+The default branch is detected: the remote's `HEAD` when there is one, else the
+current branch, else `init.defaultBranch`. Change it with `PATCH`.
+
+Returns `201` with the project. Emits `project_registered`.
+
+Refused with:
+
+- `400` — the path does not exist, is not a directory, or is not inside a git
+  repository; or `adapter_settings` is malformed. Nothing is written.
+- `409` — that repository is already registered. The message names the
+  existing project's id.
+
+### `GET /projects/:id`
+
+The project. `404` when there is none.
+
+### `PATCH /projects/:id`
+
+```json
+{ "name": "forge", "default_branch": "develop", "adapter_settings": {} }
+```
+
+Every field is optional; omitted fields are left alone. `adapter_settings` is
+replaced wholesale, not merged — send the whole blob. A `default_branch` that
+does not exist in the repository is refused with `400`. A rejected patch
+changes nothing.
+
+### `DELETE /projects/:id`
+
+`204` on success, and emits `project_removed`. The repository and any worktrees
+on disk are left where they are.
+
+Refused with `409` while the project still has a task expecting a live session
+— idle, working or waiting. Errored and stopped tasks do not block, since
+nothing is left to release them.
+
+### `GET /projects/:id/git`
+
+Git facts for the repository root, for the dashboard.
+
+```json
+{
+  "branch": "main",
+  "head": "abc1234",
+  "dirty": false,
+  "upstream": "origin/main",
+  "ahead": 0,
+  "behind": 0
+}
+```
+
+Its own endpoint because it shells out to git: listing projects has to stay
+cheap however many are registered.
+
+Every field degrades rather than failing. A detached HEAD has a `null` branch;
+a repository with no commits has a `null` head; a branch with no upstream has
+`null` for `upstream`, `ahead` and `behind`. `dirty` counts untracked files.
+
+## Events
+
+See [daemon.md](daemon.md) for the cursor semantics.
+
+### `GET /events?after=<id>&limit=<n>&task=<id>`
+
+```json
+{ "events": [ { "id": 1, "ts": "…", "kind": "project_registered", "…": "…" } ],
+  "next_after": 1 }
+```
+
+Oldest first. `limit` defaults to 100 and is capped at 500. `task` narrows the
+feed to one task.
+
+### `WS /ws/events?after=<id>&task=<id>`
+
+One JSON frame per event, same shape as an `/events` row. Takes `?token=`
+because a browser cannot set headers on the handshake.
+
+## Health
+
+### `GET /health`
+
+Unauthenticated, so a client can tell "daemon down" from "wrong token".
+
+```json
+{
+  "version": "0.1.0",
+  "uptime_secs": 1234,
+  "machine": "Ryan's MacBook Pro",
+  "binaries": [
+    { "name": "tmux", "path": null, "version": null, "ok": false,
+      "detail": "`tmux` was not found on PATH" }
+  ]
+}
+```
+
+A missing binary is a warning, never a crash: the daemon still serves history
+and settings, it just cannot run agents. Results are cached for 30 seconds.

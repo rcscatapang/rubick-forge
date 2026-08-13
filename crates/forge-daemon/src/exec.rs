@@ -61,13 +61,18 @@ pub async fn run<S: AsRef<OsStr>>(
     }
 
     let child = command.spawn().map_err(|source| {
-        if source.kind() == std::io::ErrorKind::NotFound {
-            ExecError::NotFound(program.to_owned())
-        } else {
-            ExecError::Spawn {
+        if source.kind() != std::io::ErrorKind::NotFound {
+            return ExecError::Spawn {
                 program: program.to_owned(),
                 source,
-            }
+            };
+        }
+        // Spawn reports a missing working directory the same way it reports a
+        // missing program. Telling a user their git is gone when the directory
+        // is what vanished sends them somewhere useless.
+        match cwd.filter(|dir| !dir.is_dir()) {
+            Some(dir) => ExecError::MissingWorkingDir(dir.to_path_buf()),
+            None => ExecError::NotFound(program.to_owned()),
         }
     })?;
 
@@ -116,6 +121,8 @@ fn is_executable(path: &Path) -> bool {
 pub enum ExecError {
     #[error("`{0}` was not found on PATH")]
     NotFound(String),
+    #[error("the directory {0} does not exist")]
+    MissingWorkingDir(PathBuf),
     #[error("cannot run `{program}`: {source}")]
     Spawn {
         program: String,
@@ -203,6 +210,18 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, ExecError::TimedOut { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_vanished_working_directory_is_not_blamed_on_the_program() {
+        let temp = tempfile::tempdir().unwrap();
+        let gone = temp.path().join("gone");
+
+        let err = run("/bin/pwd", &[] as &[&str], Some(&gone), DEFAULT_TIMEOUT)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ExecError::MissingWorkingDir(dir) if dir == gone));
     }
 
     #[test]

@@ -85,6 +85,23 @@ export interface Session {
   ended_at: Timestamp | null;
 }
 
+/** Mirrors `forge_core::GitStatus`. Every field degrades rather than fails. */
+export interface GitStatus {
+  /** `null` when HEAD is detached. */
+  branch: string | null;
+  /** `null` in a repository with no commits yet. */
+  head: string | null;
+  dirty: boolean;
+  upstream: string | null;
+  ahead: number | null;
+  behind: number | null;
+}
+
+/** The body of `GET /projects`. */
+export interface ProjectList {
+  projects: Project[];
+}
+
 /** Mirrors `forge_core::EventKind`. */
 export type EventKind =
   | "project_registered"

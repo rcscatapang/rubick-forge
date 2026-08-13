@@ -7,6 +7,7 @@
 mod adapter;
 mod entity;
 mod event;
+mod git;
 mod health;
 mod status;
 mod timestamp;
@@ -16,6 +17,7 @@ pub use entity::{task_branch_name, tmux_session_name, AdapterSettings, Project, 
 pub use event::{
     EventDecodeError, EventKind, EventRecord, ForgeEvent, StopReason, UnknownEventKind,
 };
+pub use git::GitStatus;
 pub use health::{BinaryStatus, Health};
 pub use status::{AgentStatus, UnknownAgentStatus};
 pub use timestamp::{InvalidTimestamp, Timestamp};

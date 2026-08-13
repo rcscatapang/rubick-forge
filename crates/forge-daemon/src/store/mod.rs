@@ -7,6 +7,7 @@
 
 mod events;
 mod migrations;
+mod projects;
 mod settings;
 
 use std::path::Path;
@@ -15,6 +16,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use rusqlite::Connection;
 
 pub use events::{EventPage, Query};
+pub use projects::{NewProject, ProjectError, ProjectPatch};
 
 pub(crate) use events::append as append_event_on;
 
