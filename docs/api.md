@@ -23,6 +23,7 @@ person as-is; raw stderr and SQL never appear in it.
 | `method_not_allowed` | 405 | The endpoint exists but not for this method |
 | `conflict` | 409 | The request contradicts current state (duplicate, or a guard) |
 | `git_missing` | 503 | `git` is not on the daemon's `PATH` |
+| `runtime_unavailable` | 503 | tmux is missing, too old, or refusing to work |
 | `internal` | 500 | The daemon's own fault; the detail is in its log |
 
 ## Projects
@@ -221,6 +222,41 @@ the worktree is dirty and `force` was not set.
 
 The same shape as `GET /projects/:id/git`, for the task's own working tree —
 its worktree, or the repository root when it has none.
+
+## Sessions
+
+A session is one run of a task inside tmux. See [runtime.md](runtime.md) for
+naming, recovery and the `tmux attach` escape hatch.
+
+### `GET /tasks/:id/sessions`
+
+```json
+{ "sessions": [ { "id": 1, "task_id": 1, "tmux_name": "forge-1",
+                  "pid": 4242, "status": "idle",
+                  "started_at": "…", "ended_at": null } ] }
+```
+
+Oldest first. A task accumulates one row per run; `ended_at: null` marks the
+live one.
+
+### `POST /tasks/:id/start`
+
+`201` with the new session. Emits `session_started`.
+
+`409` when the task is already running. `503` when tmux is missing or too old —
+the message says which, and `/health` has the detail.
+
+### `POST /tasks/:id/stop`
+
+`200` with the closed session. Emits `session_stopped`.
+
+The daemon sends `C-c`, waits up to three seconds, then kills the session.
+`409` when the task is not running.
+
+### `POST /tasks/:id/restart`
+
+`201` with a second session. The first is stopped and kept in the task's
+history rather than reused.
 
 ## Events
 

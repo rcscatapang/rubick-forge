@@ -11,6 +11,8 @@ use axum::http::{Request, StatusCode};
 use forge_daemon::bus::Bus;
 use forge_daemon::config::Config;
 use forge_daemon::http::{router, AppState};
+use forge_daemon::runtime::TmuxRuntime;
+use forge_daemon::sessions::SessionManager;
 use forge_daemon::store::Store;
 use forge_daemon::token::Token;
 use serde_json::Value;
@@ -21,6 +23,9 @@ pub type Socket =
 
 pub struct Harness {
     pub state: AppState,
+    /// The private tmux server this harness drives, so nothing here can touch
+    /// the developer's own sessions.
+    pub tmux_label: String,
     pub token: String,
     /// Kept so the database outlives the harness, and so fixtures can open
     /// their own connection to it.
@@ -29,21 +34,47 @@ pub struct Harness {
 
 impl Harness {
     pub fn new() -> Self {
+        Self::build(None)
+    }
+
+    /// A daemon pointed at a tmux that is not there, for the paths that have
+    /// to answer rather than crash when the runtime is unusable.
+    pub fn with_tmux_binary(binary: &str) -> Self {
+        Self::build(Some(binary.to_owned()))
+    }
+
+    fn build(tmux_binary: Option<String>) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let token = Token::load_or_create(&temp.path().join("token")).unwrap();
         let secret = token.expose().to_owned();
         // On disk rather than in memory, so a fixture can reach the same
         // database over its own connection.
         let store = Store::open(&temp.path().join("forge.db")).unwrap();
+        let bus = Bus::new(store.clone());
+
+        // The label carries the process id so a server leaked by a failed run
+        // cannot be adopted by the next one.
+        let tmux_label = format!(
+            "forge-harness-{}-{}",
+            std::process::id(),
+            temp.path().file_name().unwrap().to_string_lossy()
+        );
+        let config = std::sync::Arc::new(Config::default());
+        let mut runtime = TmuxRuntime::with_socket(&tmux_label);
+        if let Some(binary) = tmux_binary {
+            runtime = runtime.with_binary(binary);
+        }
+
+        let sessions = std::sync::Arc::new(SessionManager::new(
+            runtime,
+            store.clone(),
+            bus.clone(),
+            config.clone(),
+        ));
 
         Self {
-            state: AppState::new(
-                Bus::new(store.clone()),
-                store,
-                token,
-                Config::default(),
-                "0.1.0-test",
-            ),
+            state: AppState::new(bus, store, sessions, token, config, "0.1.0-test"),
+            tmux_label,
             token: secret,
             temp,
         }
@@ -202,6 +233,14 @@ impl Harness {
         }
 
         socket
+    }
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("tmux")
+            .args(["-L", &self.tmux_label, "kill-server"])
+            .output();
     }
 }
 

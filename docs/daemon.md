@@ -31,6 +31,9 @@ existing config, token and database are reused.
 bind = "127.0.0.1"
 port = 8787
 machine = "Ryan's MacBook Pro"
+stop_keys = ["C-c"]
+stop_grace_secs = 3
+poll_secs = 2
 # worktree_root = "/Users/you/worktrees"
 ```
 
@@ -41,6 +44,9 @@ machine = "Ryan's MacBook Pro"
 - `machine` — defaults to the Mac's own name; labels this daemon in a
   multi-machine UI.
 - `worktree_root` — overrides the default sibling `.forge-worktrees` directory.
+- `stop_keys`, `stop_grace_secs` — how a stop asks an agent to leave before
+  killing its session. See [runtime.md](runtime.md).
+- `poll_secs` — how often live sessions are checked against reality.
 
 Unknown keys are an error, not a silent default: a typo should be loud.
 
