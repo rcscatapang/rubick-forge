@@ -20,8 +20,8 @@ SHELL_CRATE = "rubick-forge-desktop"
 ALLOWED = {
     "tauri",
     "tauri-build",
-    "tauri-plugin-notification",  # native notifications (D20)
-    "keyring",  # remote-machine tokens in the macOS keychain (SPEC §8)
+    "tauri-plugin-notification",  # native macOS notifications
+    "keyring",  # remote-machine tokens in the macOS keychain
     "serde",
     "serde_json",
 }

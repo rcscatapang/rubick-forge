@@ -1,0 +1,75 @@
+//! The HTTP/WS surface. Everything but `/health` needs a bearer token.
+
+pub mod auth;
+pub mod error;
+mod events;
+mod extract;
+mod health;
+
+use std::sync::Arc;
+use std::time::Instant;
+
+use axum::routing::get;
+use axum::Router;
+
+use crate::bus::Bus;
+use crate::config::Config;
+use crate::store::Store;
+use crate::token::Token;
+use error::ApiError;
+use health::BinaryCache;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub bus: Bus,
+    pub store: Store,
+    pub token: Arc<Token>,
+    pub config: Arc<Config>,
+    pub machine: Arc<str>,
+    pub started_at: Instant,
+    pub version: &'static str,
+    binaries: BinaryCache,
+}
+
+impl AppState {
+    pub fn new(
+        bus: Bus,
+        store: Store,
+        token: Token,
+        config: Config,
+        version: &'static str,
+    ) -> Self {
+        Self {
+            bus,
+            store,
+            token: Arc::new(token),
+            machine: Arc::from(config.machine_name()),
+            config: Arc::new(config),
+            started_at: Instant::now(),
+            version,
+            binaries: BinaryCache::default(),
+        }
+    }
+}
+
+/// The router. Routes registered before `route_layer` are the authenticated
+/// ones; `/health` is added after it on purpose.
+pub fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/events", get(events::list))
+        .route("/ws/events", get(events::stream))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_token,
+        ))
+        .route("/health", get(health::health))
+        .fallback(|| async { ApiError::not_found("this daemon has no such endpoint") })
+        .method_not_allowed_fallback(|| async {
+            ApiError::new(
+                axum::http::StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                "that endpoint does not accept this method",
+            )
+        })
+        .with_state(state)
+}

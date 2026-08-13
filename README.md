@@ -69,7 +69,9 @@ python3 scripts/check-d3-boundary.py
 cd apps/desktop && npm run typecheck && npm test && npm run build
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the one architectural rule.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the one architectural rule, and
+[docs/daemon.md](docs/daemon.md) for the state directory, config, token and
+launchd commands.
 
 ## Security posture
 

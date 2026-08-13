@@ -3,11 +3,8 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-/// The agent CLIs Forge knows how to drive (SPEC §6, D16).
-///
-/// v0.5 re-expresses these as declarative TOML manifests (D24); until then the
-/// set is closed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// The agent CLIs Forge knows how to drive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AdapterId {
     ClaudeCode,

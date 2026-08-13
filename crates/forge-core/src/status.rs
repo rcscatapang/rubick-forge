@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-/// The heuristic state of a running agent session (SPEC §5.2, D12).
+/// The heuristic state of a running agent session.
 ///
 /// Accuracy is "good enough to glance at" by design; `Waiting` is the one
 /// variant tuned for high recall, because notifications hang off it.
@@ -16,7 +16,7 @@ pub enum AgentStatus {
     Working,
     /// Session alive, agent blocked on a human (permission prompt, confirmation).
     Waiting,
-    /// Process died with a nonzero exit (SPEC §5.2 step 1).
+    /// Process died with a nonzero exit.
     Error,
     /// Process died cleanly, or the session was never started.
     Stopped,

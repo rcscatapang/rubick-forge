@@ -17,6 +17,7 @@ apps/desktop/src-tauri/gen/schemas/
 .idea/
 *.swp
 
-# Local spec + planning material
-/docs/
+# Local spec + planning material. docs/ itself ships; the spec and the issue
+# breakdown are working notes.
+/docs/SPEC.md
 /issues/

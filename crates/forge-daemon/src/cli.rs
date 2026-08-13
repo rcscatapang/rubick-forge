@@ -1,7 +1,7 @@
 //! Argument parsing for `forge-daemon`.
 //!
 //! Hand-rolled: the daemon takes a handful of flags and nothing else, and the
-//! launchd plist (D9) passes them literally.
+//! launchd plist passes them literally.
 
 use std::fmt;
 
@@ -12,9 +12,11 @@ USAGE:
     forge-daemon [OPTIONS]
 
 OPTIONS:
-    -f, --foreground    Run in the foreground and log to stderr (dev mode)
-    -V, --version       Print version and exit
-    -h, --help          Print this help and exit
+    -f, --foreground        Run in the foreground and log to stderr (dev mode)
+        --install-launchd   Install and start the LaunchAgent, then exit
+        --uninstall-launchd Stop and remove the LaunchAgent, then exit
+    -V, --version           Print version and exit
+    -h, --help              Print this help and exit
 ";
 
 /// What the process should do, once the arguments are understood.
@@ -22,6 +24,10 @@ OPTIONS:
 pub enum Command {
     /// Start the daemon.
     Run { foreground: bool },
+    /// Write the LaunchAgent plist and bootstrap it.
+    InstallLaunchd,
+    /// Bootout the LaunchAgent and delete its plist.
+    UninstallLaunchd,
     /// Print the version and exit.
     Version,
     /// Print usage and exit.
@@ -51,6 +57,8 @@ where
     for arg in args {
         match arg.as_ref() {
             "-f" | "--foreground" => foreground = true,
+            "--install-launchd" => return Ok(Command::InstallLaunchd),
+            "--uninstall-launchd" => return Ok(Command::UninstallLaunchd),
             "-V" | "--version" => return Ok(Command::Version),
             "-h" | "--help" => return Ok(Command::Help),
             other => return Err(UnknownArg(other.to_owned())),
@@ -87,6 +95,18 @@ mod tests {
         assert_eq!(
             parse(["--foreground", "--version"]).unwrap(),
             Command::Version
+        );
+    }
+
+    #[test]
+    fn the_launchd_subcommands_are_their_own_mode() {
+        assert_eq!(
+            parse(["--install-launchd"]).unwrap(),
+            Command::InstallLaunchd
+        );
+        assert_eq!(
+            parse(["--uninstall-launchd"]).unwrap(),
+            Command::UninstallLaunchd
         );
     }
 
