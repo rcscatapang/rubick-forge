@@ -1,0 +1,29 @@
+# D3 boundary: this crate is a window shell and nothing more.
+#
+# It must never depend on a storage crate (rusqlite, sled, …), a process-
+# spawning crate, or a git crate. Everything that touches agents, tmux, git or
+# SQLite lives in `forge-daemon` and is reached over HTTP/WS. Adding such a
+# dependency here is a spec violation, not a refactor — see SPEC §2.
+[package]
+name = "rubick-forge-desktop"
+description = "Rubick Forge desktop app: a window onto the daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+autobins = false
+
+[[bin]]
+name = "rubick-forge"
+path = "src/main.rs"
+
+[lib]
+# The `_lib` suffix keeps the lib name distinct from the bin name (Windows linker quirk).
+name = "rubick_forge_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }

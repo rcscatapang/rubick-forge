@@ -1,0 +1,13 @@
+[package]
+name = "forge-core"
+description = "Shared domain types and events for Rubick Forge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
