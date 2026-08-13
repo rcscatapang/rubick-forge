@@ -174,6 +174,7 @@ impl From<GitError> for ApiError {
             GitError::NotADirectory(_) | GitError::NotARepository(_) => {
                 Self::bad_request(err.to_string())
             }
+            GitError::Refused { detail } => Self::conflict(format!("git refused: {detail}")),
             GitError::Missing => Self::new(
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 "git_missing",

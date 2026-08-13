@@ -1,0 +1,411 @@
+//! `/tasks` — the unit of work, and the git worktree it runs in.
+
+use std::path::Path;
+
+use axum::extract::{Path as UrlPath, State};
+use axum::http::StatusCode;
+use axum::Json;
+use forge_core::{AdapterId, AgentStatus, ForgeEvent, GitStatus, Project, Task};
+use serde::{Deserialize, Serialize};
+
+use super::error::{ApiError, ApiResult};
+use super::extract::Query;
+use super::AppState;
+use crate::git;
+use crate::store::{NewTask, TaskError, TaskPatch, TaskQuery};
+use crate::worktree::{self, BranchDisposal};
+
+#[derive(Debug, Deserialize)]
+pub struct CreateRequest {
+    pub project_id: i64,
+    pub title: String,
+    pub adapter: AdapterId,
+    /// Defaults to the project's default branch.
+    pub base_branch: Option<String>,
+    pub initial_prompt: Option<String>,
+    /// A task without a worktree runs in the repository root.
+    #[serde(default = "yes")]
+    pub use_worktree: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct PatchRequest {
+    pub title: Option<String>,
+    pub initial_prompt: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ListQuery {
+    pub project: Option<i64>,
+    pub status: Option<AgentStatus>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct DeleteQuery {
+    /// Clean the worktree up as part of deleting, discarding its changes.
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct CleanupRequest {
+    /// Remove the worktree even with uncommitted changes, and the branch even
+    /// if it was never merged.
+    #[serde(default)]
+    pub force: bool,
+    /// Delete `forge/<slug>` along with the worktree.
+    #[serde(default)]
+    pub delete_branch: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TaskList {
+    pub tasks: Vec<Task>,
+}
+
+pub async fn list(
+    State(state): State<AppState>,
+    Query(query): Query<ListQuery>,
+) -> ApiResult<Json<TaskList>> {
+    Ok(Json(TaskList {
+        tasks: state.store.tasks(TaskQuery {
+            project_id: query.project,
+            status: query.status,
+        })?,
+    }))
+}
+
+pub async fn get(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<i64>,
+) -> ApiResult<Json<Task>> {
+    Ok(Json(load(&state, id)?))
+}
+
+/// Git facts for the task's own working tree — its worktree, or the repository
+/// root when it has none.
+pub async fn git_status(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<i64>,
+) -> ApiResult<Json<GitStatus>> {
+    let task = load(&state, id)?;
+    let project = project_of(&state, &task)?;
+
+    Ok(Json(
+        git::status(Path::new(task.working_dir(&project))).await?,
+    ))
+}
+
+/// Create the task, then provision its worktree.
+///
+/// The row has to exist first, because the slug — and so the branch and the
+/// directory — is derived from the task's id. If provisioning fails the row is
+/// deleted again, so a failed create leaves nothing behind.
+pub async fn create(
+    State(state): State<AppState>,
+    Json(request): Json<CreateRequest>,
+) -> ApiResult<(StatusCode, Json<Task>)> {
+    if request.title.trim().is_empty() {
+        return Err(ApiError::bad_request("a task needs a title"));
+    }
+
+    let project = state.store.project(request.project_id)?.ok_or_else(|| {
+        ApiError::not_found(format!(
+            "there is no project with id {}",
+            request.project_id
+        ))
+    })?;
+
+    let base_branch = request
+        .base_branch
+        .unwrap_or_else(|| project.default_branch.clone());
+
+    if !git::branch_exists(Path::new(&project.path), &base_branch).await? {
+        return Err(ApiError::bad_request(format!(
+            "`{base_branch}` is not a branch in {}",
+            project.name
+        )));
+    }
+
+    let task = state.store.create_task(&NewTask {
+        project_id: project.id,
+        title: request.title.trim().to_owned(),
+        adapter: request.adapter,
+        base_branch: base_branch.clone(),
+        initial_prompt: request.initial_prompt,
+    })?;
+
+    let task = if request.use_worktree {
+        match provision(&state, &project, &task, &base_branch).await {
+            Ok(task) => task,
+            Err(err) => {
+                roll_back(&state, &project, &task).await;
+                return Err(err);
+            }
+        }
+    } else {
+        task
+    };
+
+    state.bus.publish(ForgeEvent::TaskCreated {
+        task_id: task.id,
+        project_id: project.id,
+        title: task.title.clone(),
+    })?;
+
+    Ok((StatusCode::CREATED, Json(task)))
+}
+
+async fn provision(
+    state: &AppState,
+    project: &Project,
+    task: &Task,
+    base: &str,
+) -> ApiResult<Task> {
+    let placement = placement_for(state, project, task)?;
+
+    worktree::create(project, &placement, base).await?;
+
+    let path = placement.path.display().to_string();
+    let attached = state
+        .store
+        .attach_worktree(task.id, &placement.branch, &path)?;
+
+    state.bus.publish(ForgeEvent::WorktreeCreated {
+        task_id: task.id,
+        path,
+        branch: placement.branch,
+    })?;
+
+    Ok(attached)
+}
+
+fn placement_for(
+    state: &AppState,
+    project: &Project,
+    task: &Task,
+) -> ApiResult<worktree::Placement> {
+    let root = worktree::root_for(&state.store, project)?;
+    Ok(worktree::placement(&root, project, &task.title, task.id))
+}
+
+/// Undo a half-finished create.
+///
+/// Provisioning can fail after git has already made the worktree — recording
+/// it in the database is a separate step — so the directory and branch are
+/// removed too, not just the row. Failures here are logged rather than
+/// returned: the caller is already receiving the error that caused this.
+async fn roll_back(state: &AppState, project: &Project, task: &Task) {
+    if let Ok(placement) = placement_for(state, project, task) {
+        if placement.path.exists() {
+            if let Err(error) = worktree::remove(
+                project,
+                &placement.path,
+                &placement.branch,
+                BranchDisposal::Delete,
+                true,
+            )
+            .await
+            {
+                tracing::error!(task = task.id, %error, "cannot roll back a worktree");
+            }
+        }
+    }
+
+    if let Err(error) = state.store.delete_task(task.id) {
+        tracing::error!(task = task.id, %error, "cannot roll back a task row");
+    }
+}
+
+pub async fn patch(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<i64>,
+    Json(request): Json<PatchRequest>,
+) -> ApiResult<Json<Task>> {
+    load(&state, id)?;
+
+    if request.title.as_ref().is_some_and(|t| t.trim().is_empty()) {
+        return Err(ApiError::bad_request("a task needs a title"));
+    }
+
+    // Renaming does not move the worktree: the slug is fixed at creation, and
+    // moving a checked-out directory under a running agent is not worth it.
+    Ok(Json(state.store.update_task(
+        id,
+        &TaskPatch {
+            title: request.title.map(|t| t.trim().to_owned()),
+            initial_prompt: request.initial_prompt,
+            status: None,
+        },
+    )?))
+}
+
+pub async fn delete(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<i64>,
+    Query(query): Query<DeleteQuery>,
+) -> ApiResult<StatusCode> {
+    let task = load(&state, id)?;
+
+    if state.store.has_live_session(id)? {
+        return Err(ApiError::conflict(
+            "this task still has a running session; stop it first",
+        ));
+    }
+
+    if let Some(path) = task.worktree_path.clone() {
+        if !query.force {
+            return Err(ApiError::conflict(
+                "this task still has a worktree; clean it up first, or delete with force=true",
+            ));
+        }
+        // The branch survives: deleting a task should not be able to destroy
+        // commits that were never merged anywhere.
+        let project = project_of(&state, &task)?;
+        tear_down(&state, &project, &task, &path, BranchDisposal::Keep, true).await?;
+    }
+
+    state.store.delete_task(id)?;
+    state.bus.publish(ForgeEvent::TaskDeleted { task_id: id })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn cleanup_worktree(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<i64>,
+    body: Option<Json<CleanupRequest>>,
+) -> ApiResult<Json<Task>> {
+    let task = load(&state, id)?;
+    let Json(request) = body.unwrap_or_default();
+
+    let Some(path) = task.worktree_path.clone() else {
+        return Err(ApiError::conflict("this task has no worktree"));
+    };
+
+    if state.store.has_live_session(id)? {
+        return Err(ApiError::conflict(
+            "this task still has a running session; stop it before removing its worktree",
+        ));
+    }
+
+    if !request.force && worktree::is_dirty(Path::new(&path)).await? {
+        return Err(ApiError::conflict(
+            "this worktree has uncommitted changes; commit them, or clean up with force=true",
+        ));
+    }
+
+    let project = project_of(&state, &task)?;
+    let disposal = if request.delete_branch {
+        BranchDisposal::Delete
+    } else {
+        BranchDisposal::Keep
+    };
+
+    tear_down(&state, &project, &task, &path, disposal, request.force).await?;
+
+    Ok(Json(
+        state
+            .store
+            .detach_worktree(id, disposal == BranchDisposal::Keep)?,
+    ))
+}
+
+/// Remove the worktree and announce it. The task row is the caller's problem.
+async fn tear_down(
+    state: &AppState,
+    project: &Project,
+    task: &Task,
+    path: &str,
+    disposal: BranchDisposal,
+    force: bool,
+) -> ApiResult<()> {
+    worktree::remove(project, Path::new(path), &task.branch, disposal, force).await?;
+
+    state.bus.publish(ForgeEvent::WorktreeRemoved {
+        task_id: task.id,
+        path: path.to_owned(),
+    })?;
+
+    Ok(())
+}
+
+fn load(state: &AppState, id: i64) -> ApiResult<Task> {
+    state
+        .store
+        .task(id)?
+        .ok_or_else(|| ApiError::not_found(format!("there is no task with id {id}")))
+}
+
+/// A task always has a project: the foreign key cascades, so a missing one is
+/// the daemon's own inconsistency rather than a bad request.
+fn project_of(state: &AppState, task: &Task) -> ApiResult<Project> {
+    state.store.project(task.project_id)?.ok_or_else(|| {
+        tracing::error!(
+            task = task.id,
+            project = task.project_id,
+            "a task outlived its project"
+        );
+        ApiError::internal("this task's project is missing; check the daemon logs")
+    })
+}
+
+impl From<TaskError> for ApiError {
+    fn from(err: TaskError) -> Self {
+        match err {
+            TaskError::NotFound(_) | TaskError::NoSuchProject(_) => {
+                Self::not_found(err.to_string())
+            }
+            TaskError::Store(store) => store.into(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_task_or_project_is_a_404() {
+        assert_eq!(
+            ApiError::from(TaskError::NotFound(7)).status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            ApiError::from(TaskError::NoSuchProject(7)).status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn a_worktree_is_the_default_for_a_new_task() {
+        let request: CreateRequest =
+            serde_json::from_str(r#"{"project_id":1,"title":"t","adapter":"claude-code"}"#)
+                .unwrap();
+
+        assert!(request.use_worktree);
+        assert!(request.base_branch.is_none());
+    }
+
+    #[test]
+    fn opting_out_of_a_worktree_is_explicit() {
+        let request: CreateRequest = serde_json::from_str(
+            r#"{"project_id":1,"title":"t","adapter":"codex","use_worktree":false}"#,
+        )
+        .unwrap();
+
+        assert!(!request.use_worktree);
+    }
+
+    #[test]
+    fn cleanup_keeps_the_branch_and_refuses_dirt_unless_told_otherwise() {
+        let request: CleanupRequest = serde_json::from_str("{}").unwrap();
+
+        assert!(!request.force);
+        assert!(!request.delete_branch);
+    }
+}

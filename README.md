@@ -13,7 +13,7 @@ The roadmap, roughly in build order.
 **The local control plane** — the core of it, and the part everything else hangs off:
 
 - **Agents**: launch Claude Code or Codex per task, interactively, in tmux. Start/stop/restart, live terminal (xterm.js), send instructions, heuristic status (idle / working / waiting / error / stopped).
-- **Projects & git**: register local repos; each task gets its own branch + git worktree (or runs in the repo root when you choose); worktree status and cleanup from the UI.
+- **Projects & git**: register local repos; each task gets its own branch + git worktree — in `.forge-worktrees/` beside the repo, never inside it — or runs in the repo root when you choose; worktree status and cleanup from the UI.
 - **Durability**: launchd keeps the daemon alive; the daemon re-adopts tmux sessions on restart. `tmux attach -t forge-<task>` is always an escape hatch.
 - **Notifications**: native macOS pings when an agent is waiting for input, finishes, or errors.
 

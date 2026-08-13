@@ -102,6 +102,31 @@ export interface ProjectList {
   projects: Project[];
 }
 
+/** The body of `GET /tasks`. */
+export interface TaskList {
+  tasks: Task[];
+}
+
+/** The body of `POST /tasks`. */
+export interface CreateTaskRequest {
+  project_id: number;
+  title: string;
+  adapter: AdapterId;
+  /** Defaults to the project's default branch. */
+  base_branch?: string;
+  initial_prompt?: string;
+  /** Defaults to true; false runs the task in the repository root. */
+  use_worktree?: boolean;
+}
+
+/** The body of `POST /tasks/:id/worktree/cleanup`. Both default to false. */
+export interface CleanupWorktreeRequest {
+  /** Remove a dirty worktree, and an unmerged branch. */
+  force?: boolean;
+  /** Drop `forge/<slug>` as well as the directory. */
+  delete_branch?: boolean;
+}
+
 /** Mirrors `forge_core::EventKind`. */
 export type EventKind =
   | "project_registered"

@@ -118,6 +118,110 @@ Every field degrades rather than failing. A detached HEAD has a `null` branch;
 a repository with no commits has a `null` head; a branch with no upstream has
 `null` for `upstream`, `ahead` and `behind`. `dirty` counts untracked files.
 
+## Tasks
+
+A task is the unit of work: a title, a prompt, a branch, and — unless you opt
+out — a git worktree of its own. Agents run inside it.
+
+### `GET /tasks?project=<id>&status=<status>`
+
+```json
+{ "tasks": [ { "id": 1, "title": "Add adapters", "…": "…" } ] }
+```
+
+Both filters are optional.
+
+### `POST /tasks`
+
+```json
+{
+  "project_id": 1,
+  "title": "Add adapters",
+  "adapter": "claude-code",
+  "base_branch": "main",
+  "initial_prompt": "Implement the adapter trait",
+  "use_worktree": true
+}
+```
+
+`project_id`, `title` and `adapter` are required.
+
+- `base_branch` defaults to the project's. It must exist.
+- `use_worktree` defaults to `true`. A task with a worktree gets a directory of
+  its own and a `forge/<slug>` branch forked from the base. A task without one
+  has `worktree_path: null` and runs in the repository root, on the base branch
+  itself — so agents on such tasks share a checkout.
+- The slug comes from the title plus the task's id, reduced to lowercase ASCII
+  words. Two tasks may share a title; they never share a branch or a directory.
+
+Worktrees are created at `<root>/<project>/<slug>`, where `<root>` is the
+`worktree_root` setting when set, and `<parent-of-repo>/.forge-worktrees`
+otherwise — beside the repository, never inside it. Both the project and slug
+components are reduced to lowercase ASCII words, so nothing a user types can
+place a directory outside the root.
+
+Returns `201`. Emits `worktree_created` then `task_created`.
+
+Provisioning is transactional in the way that matters: if the worktree cannot
+be created, the task row is deleted again, so a failed create leaves neither a
+row nor a directory.
+
+Refused with:
+
+- `400` — no title, or a base branch that does not exist.
+- `404` — no such project.
+- `409` — git refused, and says why (usually the branch or directory exists).
+
+### `GET /tasks/:id`
+
+The task. `404` when there is none.
+
+### `PATCH /tasks/:id`
+
+```json
+{ "title": "Renamed", "initial_prompt": "…" }
+```
+
+Renaming does not move the worktree: the slug is fixed when the task is
+created, and moving a checked-out directory under a running agent is not worth
+the surprise.
+
+### `DELETE /tasks/:id?force=true`
+
+`204` on success. Emits `task_deleted`.
+
+Refused with `409` while the task has a running session — stop it first — or
+while it still has a worktree. `force=true` cleans the worktree up first,
+discarding uncommitted changes. The `forge/<slug>` branch is kept: deleting a
+task should not be able to destroy commits that were never merged anywhere.
+
+### `POST /tasks/:id/worktree/cleanup`
+
+```json
+{ "force": false, "delete_branch": false }
+```
+
+Removes the worktree. Returns the task. Emits `worktree_removed`.
+
+- `force` removes a worktree with uncommitted changes, and deletes an unmerged
+  branch. Without it, either is a `409`.
+- `delete_branch` drops `forge/<slug>` as well. The default keeps it, so work
+  is recoverable after cleanup.
+
+The task keeps pointing at `forge/<slug>` when the branch survives, since that
+is where its work is; only deleting the branch sends the task back to its base.
+
+A worktree whose directory you deleted by hand cleans up without complaint —
+git's own record of it is pruned instead.
+
+`409` when the task has no worktree, when its session is still running, or when
+the worktree is dirty and `force` was not set.
+
+### `GET /tasks/:id/git`
+
+The same shape as `GET /projects/:id/git`, for the task's own working tree —
+its worktree, or the repository root when it has none.
+
 ## Events
 
 See [daemon.md](daemon.md) for the cursor semantics.
