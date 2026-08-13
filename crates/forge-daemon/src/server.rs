@@ -5,10 +5,14 @@ use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio::signal;
 
+use std::sync::Arc;
+
 use crate::bus::Bus;
 use crate::config::{Config, ConfigError};
 use crate::http::{router, AppState};
 use crate::paths::{StateDir, StateDirError};
+use crate::runtime::TmuxRuntime;
+use crate::sessions::SessionManager;
 use crate::store::{Store, StoreError};
 use crate::token::{Token, TokenError};
 use crate::VERSION;
@@ -35,10 +39,53 @@ impl Daemon {
             "state loaded"
         );
 
+        let bus = Bus::new(store.clone());
+        let shared = Arc::new(config);
+        let sessions = Arc::new(SessionManager::new(
+            TmuxRuntime::new(),
+            store.clone(),
+            bus.clone(),
+            shared.clone(),
+        ));
+
         Ok(Self {
-            addr: config.socket_addr(),
-            state: AppState::new(Bus::new(store.clone()), store, token, config, VERSION),
+            addr: shared.socket_addr(),
+            state: AppState::new(bus, store, sessions, token, shared, VERSION),
         })
+    }
+
+    /// Bring the sessions table back in line with what tmux actually has.
+    ///
+    /// The daemon may have been stopped, crashed or upgraded while sessions
+    /// kept running; this is what makes them survive that.
+    pub async fn reconcile(&self) {
+        match self.state.sessions.reconcile().await {
+            Ok(_) => {}
+            // Not fatal: without tmux the daemon still serves history and
+            // settings, and `/health` says why agents cannot start.
+            Err(error) => tracing::warn!(%error, "cannot reconcile sessions on boot"),
+        }
+    }
+
+    /// Watch live sessions until the daemon shuts down.
+    ///
+    /// Without this the daemon only notices a session ending when it next
+    /// boots, so a task whose agent exited would sit there claiming to run.
+    pub fn watch(&self) {
+        let sessions = self.state.sessions.clone();
+        let interval = self.state.config.poll_interval();
+
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                ticker.tick().await;
+                if let Err(error) = sessions.poll().await {
+                    tracing::warn!(%error, "a session poll failed");
+                }
+            }
+        });
     }
 
     /// Serve until SIGINT or SIGTERM.

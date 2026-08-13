@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 /// only by default; the tailnet bind is an explicit opt-in.
 pub const DEFAULT_PORT: u16 = 8787;
 
+/// What both agent CLIs treat as "stop what you are doing".
+const DEFAULT_STOP_KEY: &str = "C-c";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -21,6 +24,13 @@ pub struct Config {
     pub machine: Option<String>,
     /// Overrides the `<parent-of-repo>/.forge-worktrees` default.
     pub worktree_root: Option<PathBuf>,
+    /// The keys a stop sends before killing the session, so an agent can shut
+    /// down on its own terms. tmux key names, in order.
+    pub stop_keys: Vec<String>,
+    /// How long a stop waits for the agent to take that hint.
+    pub stop_grace_secs: u64,
+    /// How often live sessions are checked against reality.
+    pub poll_secs: u64,
 }
 
 impl Default for Config {
@@ -30,6 +40,9 @@ impl Default for Config {
             port: DEFAULT_PORT,
             machine: None,
             worktree_root: None,
+            stop_keys: vec![DEFAULT_STOP_KEY.to_owned()],
+            stop_grace_secs: 3,
+            poll_secs: 2,
         }
     }
 }
@@ -78,12 +91,28 @@ impl Config {
         })
     }
 
+    /// The keys a stop sends, borrowed for passing to the runtime.
+    pub fn stop_keys(&self) -> Vec<&str> {
+        self.stop_keys.iter().map(String::as_str).collect()
+    }
+
+    pub fn stop_grace(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.stop_grace_secs)
+    }
+
+    pub fn poll_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.poll_secs)
+    }
+
     fn validate(&self) -> Result<(), ConfigError> {
         if self.bind.is_unspecified() {
             return Err(ConfigError::UnspecifiedBind(self.bind));
         }
         if self.port == 0 {
             return Err(ConfigError::ZeroPort);
+        }
+        if self.poll_secs == 0 {
+            return Err(ConfigError::ZeroPoll);
         }
         Ok(())
     }
@@ -128,6 +157,8 @@ pub enum ConfigError {
     UnspecifiedBind(IpAddr),
     #[error("port = 0 would pick a random port the app cannot find")]
     ZeroPort,
+    #[error("poll_secs = 0 would spin instead of polling")]
+    ZeroPoll,
 }
 
 #[cfg(test)]
@@ -207,6 +238,44 @@ mod tests {
         assert!(matches!(
             Config::load_or_create(&path),
             Err(ConfigError::Parse { .. })
+        ));
+    }
+
+    #[test]
+    fn stopping_is_configurable_and_defaults_to_an_interrupt() {
+        let config = Config::default();
+
+        assert_eq!(config.stop_keys(), ["C-c"]);
+        assert_eq!(config.stop_grace().as_secs(), 3);
+        assert_eq!(config.poll_interval().as_secs(), 2);
+    }
+
+    #[test]
+    fn a_file_can_replace_the_stop_sequence() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("daemon.toml");
+        std::fs::write(
+            &path,
+            "stop_keys = [\"Escape\", \"q\"]\nstop_grace_secs = 10\npoll_secs = 5\n",
+        )
+        .unwrap();
+
+        let config = Config::load_or_create(&path).unwrap();
+
+        assert_eq!(config.stop_keys(), ["Escape", "q"]);
+        assert_eq!(config.stop_grace().as_secs(), 10);
+        assert_eq!(config.poll_interval().as_secs(), 5);
+    }
+
+    #[test]
+    fn a_zero_poll_interval_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("daemon.toml");
+        std::fs::write(&path, "poll_secs = 0\n").unwrap();
+
+        assert!(matches!(
+            Config::load_or_create(&path),
+            Err(ConfigError::ZeroPoll)
         ));
     }
 

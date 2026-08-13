@@ -8,6 +8,7 @@
 mod events;
 mod migrations;
 mod projects;
+mod sessions;
 mod settings;
 mod tasks;
 
@@ -18,6 +19,7 @@ use rusqlite::Connection;
 
 pub use events::{EventPage, Query};
 pub use projects::{NewProject, ProjectError, ProjectPatch};
+pub use sessions::SessionError;
 pub use tasks::{NewTask, TaskError, TaskPatch, TaskQuery};
 
 pub(crate) use events::append as append_event_on;

@@ -45,7 +45,7 @@ Desktop app (Tauri, React)          Phone (Telegram, later)
 ## Requirements
 
 - macOS (Apple Silicon or Intel). Linux and Windows are out of scope.
-- `tmux`, `git` on PATH
+- `tmux` 3.0 or newer, and `git`, on PATH
 - The agent CLIs you want to drive: [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and/or Codex, already authenticated
 
 ## Development
@@ -69,9 +69,10 @@ python3 scripts/check-d3-boundary.py
 cd apps/desktop && npm run typecheck && npm test && npm run build
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the one architectural rule, and
-[docs/daemon.md](docs/daemon.md) for the state directory, config, token and
-launchd commands.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the one architectural rule.
+[docs/daemon.md](docs/daemon.md) covers the state directory, config, token and
+launchd commands; [docs/runtime.md](docs/runtime.md) the tmux session model and
+recovery; [docs/api.md](docs/api.md) the HTTP/WS surface.
 
 ## Security posture
 

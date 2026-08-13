@@ -16,15 +16,22 @@ use axum::Router;
 
 use crate::bus::Bus;
 use crate::config::Config;
+use crate::runtime::TmuxRuntime;
+use crate::sessions::SessionManager;
 use crate::store::Store;
 use crate::token::Token;
 use error::ApiError;
 use health::BinaryCache;
 
+/// tmux is the only runtime, so the app state names it concretely; the
+/// manager itself is written against the trait.
+pub type Sessions = SessionManager<TmuxRuntime>;
+
 #[derive(Clone)]
 pub struct AppState {
     pub bus: Bus,
     pub store: Store,
+    pub sessions: Arc<Sessions>,
     pub token: Arc<Token>,
     pub config: Arc<Config>,
     pub machine: Arc<str>,
@@ -37,16 +44,18 @@ impl AppState {
     pub fn new(
         bus: Bus,
         store: Store,
+        sessions: Arc<Sessions>,
         token: Token,
-        config: Config,
+        config: Arc<Config>,
         version: &'static str,
     ) -> Self {
         Self {
             bus,
             store,
+            sessions,
             token: Arc::new(token),
             machine: Arc::from(config.machine_name()),
-            config: Arc::new(config),
+            config,
             started_at: Instant::now(),
             version,
             binaries: BinaryCache::default(),
@@ -74,6 +83,10 @@ pub fn router(state: AppState) -> Router {
             get(tasks::get).patch(tasks::patch).delete(tasks::delete),
         )
         .route("/tasks/{id}/git", get(tasks::git_status))
+        .route("/tasks/{id}/sessions", get(tasks::sessions))
+        .route("/tasks/{id}/start", axum::routing::post(tasks::start))
+        .route("/tasks/{id}/stop", axum::routing::post(tasks::stop))
+        .route("/tasks/{id}/restart", axum::routing::post(tasks::restart))
         .route(
             "/tasks/{id}/worktree/cleanup",
             axum::routing::post(tasks::cleanup_worktree),

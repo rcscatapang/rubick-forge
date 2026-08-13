@@ -5,13 +5,14 @@ use std::path::Path;
 use axum::extract::{Path as UrlPath, State};
 use axum::http::StatusCode;
 use axum::Json;
-use forge_core::{AdapterId, AgentStatus, ForgeEvent, GitStatus, Project, Task};
+use forge_core::{AdapterId, AgentStatus, ForgeEvent, GitStatus, Project, Session, Task};
 use serde::{Deserialize, Serialize};
 
 use super::error::{ApiError, ApiResult};
 use super::extract::Query;
 use super::AppState;
 use crate::git;
+use crate::sessions::SessionManagerError;
 use crate::store::{NewTask, TaskError, TaskPatch, TaskQuery};
 use crate::worktree::{self, BranchDisposal};
 
@@ -65,6 +66,68 @@ pub struct CleanupRequest {
 #[derive(Debug, Serialize)]
 pub struct TaskList {
     pub tasks: Vec<Task>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionList {
+    pub sessions: Vec<Session>,
+}
+
+/// An empty command starts the runtime's default shell in the task's working
+/// directory, which is attachable and assumes no particular agent.
+fn default_command() -> Vec<String> {
+    Vec::new()
+}
+
+/// Every run of a task, oldest first.
+pub async fn sessions(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<i64>,
+) -> ApiResult<Json<SessionList>> {
+    load(&state, id)?;
+
+    Ok(Json(SessionList {
+        sessions: state.store.sessions_for_task(id)?,
+    }))
+}
+
+pub async fn start(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<i64>,
+) -> ApiResult<(StatusCode, Json<Session>)> {
+    let task = load(&state, id)?;
+    let project = project_of(&state, &task)?;
+
+    let session = state
+        .sessions
+        .start(&task, &project, &default_command())
+        .await?;
+
+    Ok((StatusCode::CREATED, Json(session)))
+}
+
+pub async fn stop(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<i64>,
+) -> ApiResult<Json<Session>> {
+    load(&state, id)?;
+
+    Ok(Json(state.sessions.stop(id).await?))
+}
+
+pub async fn restart(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<i64>,
+) -> ApiResult<(StatusCode, Json<Session>)> {
+    let task = load(&state, id)?;
+    let project = project_of(&state, &task)?;
+
+    let session = state
+        .sessions
+        .restart(&task, &project, &default_command())
+        .await?;
+
+    Ok((StatusCode::CREATED, Json(session)))
 }
 
 pub async fn list(
@@ -352,6 +415,24 @@ fn project_of(state: &AppState, task: &Task) -> ApiResult<Project> {
         );
         ApiError::internal("this task's project is missing; check the daemon logs")
     })
+}
+
+impl From<SessionManagerError> for ApiError {
+    fn from(err: SessionManagerError) -> Self {
+        match err {
+            SessionManagerError::AlreadyRunning(_) | SessionManagerError::NotRunning(_) => {
+                Self::conflict(err.to_string())
+            }
+            // A runtime that cannot start sessions is a dependency problem the
+            // user can fix, and `/health` says which one.
+            SessionManagerError::Runtime(detail) => Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "runtime_unavailable",
+                detail,
+            ),
+            SessionManagerError::Store(store) => store.into(),
+        }
+    }
 }
 
 impl From<TaskError> for ApiError {

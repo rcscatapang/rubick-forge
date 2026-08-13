@@ -39,6 +39,8 @@ fn run(foreground: bool) -> Result<(), Box<dyn std::error::Error>> {
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
         let daemon = Daemon::bootstrap(&state_dir)?;
+        daemon.reconcile().await;
+        daemon.watch();
         daemon.serve().await
     })?;
 

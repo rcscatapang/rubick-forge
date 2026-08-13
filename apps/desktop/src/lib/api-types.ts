@@ -107,6 +107,11 @@ export interface TaskList {
   tasks: Task[];
 }
 
+/** The body of `GET /tasks/:id/sessions`. */
+export interface SessionList {
+  sessions: Session[];
+}
+
 /** The body of `POST /tasks`. */
 export interface CreateTaskRequest {
   project_id: number;

@@ -8,6 +8,7 @@ use std::time::Duration;
 use forge_core::BinaryStatus;
 
 use crate::exec::{self, ExecError};
+use crate::runtime::tmux::version_complaint;
 
 /// Version flags answer instantly or not at all.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -24,13 +25,29 @@ pub async fn probe(name: &str) -> BinaryStatus {
     let found = path.display().to_string();
 
     match exec::run(name, &["--version"], None, PROBE_TIMEOUT).await {
-        Ok(output) if output.success() => BinaryStatus {
-            name: name.to_owned(),
-            path: Some(found),
-            version: first_line(&output.stdout),
-            ok: true,
-            detail: None,
-        },
+        Ok(output) if output.success() => {
+            let version = first_line(&output.stdout);
+
+            // Being present is not the same as being usable: an old tmux is
+            // missing the pane formats the status poller reads.
+            if let Some(complaint) = unusable_version(name, version.as_deref()) {
+                return BinaryStatus {
+                    name: name.to_owned(),
+                    path: Some(found),
+                    version,
+                    ok: false,
+                    detail: Some(complaint),
+                };
+            }
+
+            BinaryStatus {
+                name: name.to_owned(),
+                path: Some(found),
+                version,
+                ok: true,
+                detail: None,
+            }
+        }
         Ok(output) => unusable(
             name,
             found,
@@ -59,6 +76,19 @@ pub async fn probe_required() -> Vec<BinaryStatus> {
         statuses.push(probe(name).await);
     }
     statuses
+}
+
+/// The one binary with a version floor. The runtime owns what that floor is,
+/// so a green `/health` and a refused start cannot disagree.
+fn unusable_version(name: &str, version: Option<&str>) -> Option<String> {
+    if name != "tmux" {
+        return None;
+    }
+
+    match version {
+        Some(reported) => version_complaint(reported),
+        None => Some("tmux did not report a version".to_owned()),
+    }
 }
 
 fn first_line(text: &str) -> Option<String> {
@@ -104,6 +134,27 @@ mod tests {
 
         let names: Vec<&str> = statuses.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, REQUIRED);
+    }
+
+    #[test]
+    fn an_old_tmux_is_present_but_not_usable() {
+        assert!(unusable_version("tmux", Some("tmux 2.9a"))
+            .unwrap()
+            .contains("too old"));
+        assert_eq!(unusable_version("tmux", Some("tmux 3.0")), None);
+        assert_eq!(unusable_version("tmux", Some("tmux 3.7b")), None);
+    }
+
+    #[test]
+    fn only_tmux_has_a_version_floor() {
+        assert_eq!(unusable_version("git", Some("git version 1.0")), None);
+    }
+
+    #[test]
+    fn a_tmux_whose_version_cannot_be_read_is_not_called_healthy() {
+        // Starting a session would refuse; health must say the same thing.
+        assert!(unusable_version("tmux", Some("tmux")).is_some());
+        assert!(unusable_version("tmux", None).is_some());
     }
 
     #[test]
