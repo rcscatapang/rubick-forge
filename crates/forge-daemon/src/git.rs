@@ -90,6 +90,61 @@ pub async fn branch_exists(repo: &Path, branch: &str) -> Result<bool, GitError> 
     Ok(output.success())
 }
 
+/// Create a worktree at `path`, on a new `branch` forked from `base`.
+///
+/// Fails rather than adopts when the branch or the directory already exists,
+/// which is what makes the caller's rollback meaningful.
+pub async fn worktree_add(
+    repo: &Path,
+    path: &Path,
+    branch: &str,
+    base: &str,
+) -> Result<(), GitError> {
+    let output = run(
+        repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            branch,
+            "--end-of-options",
+            &path.display().to_string(),
+            base,
+        ],
+    )
+    .await?;
+
+    refusable(&output)
+}
+
+/// Remove a worktree. Without `force`, git refuses one with local changes.
+pub async fn worktree_remove(repo: &Path, path: &Path, force: bool) -> Result<(), GitError> {
+    let mut args = vec!["worktree", "remove"];
+    if force {
+        args.push("--force");
+    }
+    args.push("--end-of-options");
+    let path = path.display().to_string();
+    args.push(&path);
+
+    let output = run(repo, &args).await?;
+    refusable(&output)
+}
+
+/// Drop a branch. Without `force`, git refuses one that is not merged.
+pub async fn branch_delete(repo: &Path, branch: &str, force: bool) -> Result<(), GitError> {
+    let flag = if force { "-D" } else { "-d" };
+    let output = run(repo, &["branch", flag, "--end-of-options", branch]).await?;
+    refusable(&output)
+}
+
+/// Forget worktrees whose directories have been deleted behind git's back.
+pub async fn worktree_prune(repo: &Path) -> Result<(), GitError> {
+    let output = run(repo, &["worktree", "prune"]).await?;
+    require(&output, repo)
+}
+
 /// Branch, dirtiness and divergence for a working tree.
 pub async fn status(tree: &Path) -> Result<GitStatus, GitError> {
     // First, and checked: every later command answers with a non-zero exit for
@@ -184,6 +239,22 @@ async fn run(cwd: &Path, args: &[&str]) -> Result<Output, GitError> {
         })
 }
 
+/// Worktree and branch commands fail for reasons the *user* caused and can
+/// fix — the branch exists, the directory exists, the tree has changes, the
+/// branch is unmerged — so git's own sentence is the most useful thing to pass
+/// on, unlike the read paths where it is noise.
+fn refusable(output: &Output) -> Result<(), GitError> {
+    if output.success() {
+        return Ok(());
+    }
+    Err(GitError::Refused {
+        detail: output
+            .first_error_line()
+            .trim_start_matches("fatal: ")
+            .to_owned(),
+    })
+}
+
 /// Turn a non-zero exit into an error, keeping only git's first complaint.
 fn require(output: &Output, tree: &Path) -> Result<(), GitError> {
     if output.success() {
@@ -205,6 +276,8 @@ pub enum GitError {
     NotARepository(PathBuf),
     #[error("cannot read the repository at {path}: {detail}")]
     Unreadable { path: PathBuf, detail: String },
+    #[error("git refused: {detail}")]
+    Refused { detail: String },
     #[error("`git {command}` failed: {detail}")]
     Failed { command: String, detail: String },
 }

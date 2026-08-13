@@ -133,13 +133,39 @@ impl Harness {
     /// A task row, written directly, for guards that only care about a
     /// task's status.
     pub fn insert_task(&self, project_id: i64, status: &str) {
-        let conn = rusqlite::Connection::open(self.temp.path().join("forge.db")).unwrap();
-        conn.execute(
+        self.connection()
+            .execute(
             "INSERT INTO tasks (project_id, title, adapter, base_branch, branch, status, created_at, updated_at)
              VALUES (?1, 'a task', 'claude-code', 'main', 'main', ?2, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
-            rusqlite::params![project_id, status],
-        )
-        .unwrap();
+                rusqlite::params![project_id, status],
+            )
+            .unwrap();
+    }
+
+    /// A live session row, written directly, for guards that only care that
+    /// one exists.
+    pub fn insert_session(&self, task_id: i64) {
+        self.connection()
+            .execute(
+                "INSERT INTO sessions (task_id, tmux_name, status, started_at)
+                 VALUES (?1, ?2, 'working', '2026-01-01T00:00:00Z')",
+                rusqlite::params![task_id, format!("forge-{task_id}")],
+            )
+            .unwrap();
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) {
+        self.connection()
+            .execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![key, value],
+            )
+            .unwrap();
+    }
+
+    fn connection(&self) -> rusqlite::Connection {
+        rusqlite::Connection::open(self.temp.path().join("forge.db")).unwrap()
     }
 
     /// Bind a real socket, so WebSocket clients have something to connect to.

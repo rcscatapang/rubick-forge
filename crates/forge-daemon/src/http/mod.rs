@@ -6,6 +6,7 @@ mod events;
 mod extract;
 mod health;
 mod projects;
+mod tasks;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -67,6 +68,16 @@ pub fn router(state: AppState) -> Router {
                 .delete(projects::delete),
         )
         .route("/projects/{id}/git", get(projects::git_status))
+        .route("/tasks", get(tasks::list).post(tasks::create))
+        .route(
+            "/tasks/{id}",
+            get(tasks::get).patch(tasks::patch).delete(tasks::delete),
+        )
+        .route("/tasks/{id}/git", get(tasks::git_status))
+        .route(
+            "/tasks/{id}/worktree/cleanup",
+            axum::routing::post(tasks::cleanup_worktree),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_token,

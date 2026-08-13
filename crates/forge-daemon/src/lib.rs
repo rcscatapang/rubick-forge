@@ -15,7 +15,9 @@ pub mod launchd;
 pub mod logging;
 pub mod paths;
 pub mod server;
+pub mod slug;
 pub mod store;
 pub mod token;
+pub mod worktree;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
