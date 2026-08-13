@@ -135,6 +135,11 @@ export interface AdapterList {
   adapters: AdapterInfo[];
 }
 
+/** The body of `GET /settings` and `PATCH /settings`. */
+export interface SettingsBody {
+  settings: Record<string, string>;
+}
+
 /** The body of `POST /tasks/:id/instruction`. */
 export interface InstructionRequest {
   text: string;

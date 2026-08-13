@@ -23,7 +23,9 @@ export const keys = {
   tasks: () => [...keys.all, "tasks"] as const,
   taskGit: (id: number) => [...keys.all, "tasks", id, "git"] as const,
   sessions: (taskId: number) => [...keys.all, "tasks", taskId, "sessions"] as const,
+  session: (id: number) => [...keys.all, "sessions", id] as const,
   events: () => [...keys.all, "events"] as const,
+  settings: () => [...keys.all, "settings"] as const,
 };
 
 function useClient() {
@@ -65,6 +67,27 @@ export function useTaskGit(id: number) {
 export function useSessions(taskId: number) {
   const api = useClient();
   return useQuery({ queryKey: keys.sessions(taskId), queryFn: () => api.sessions(taskId) });
+}
+
+export function useSettings() {
+  const api = useClient();
+  return useQuery({ queryKey: keys.settings(), queryFn: () => api.settings() });
+}
+
+export function useUpdateSettings() {
+  const api = useClient();
+  const queries = useQueryClient();
+
+  return useMutation({
+    mutationFn: (changes: Record<string, string | null>) => api.updateSettings(changes),
+    onSuccess: (updated) => queries.setQueryData(keys.settings(), updated),
+  });
+}
+
+/** One session, for a view that knows only its id. */
+export function useSession(id: number) {
+  const api = useClient();
+  return useQuery({ queryKey: keys.session(id), queryFn: () => api.session(id) });
 }
 
 export function useActivity() {

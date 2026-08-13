@@ -61,6 +61,31 @@ the affected part of the screen refetches.
 
 No test or build status. That arrives with the GitHub integration.
 
+## Notifications
+
+Three things get a native notification: an agent is **waiting** for you, a task
+**finished**, an agent **errored**. Nothing else — a dashboard you have to
+watch is one you stop watching, and a stream of notifications is one you turn
+off.
+
+Each kind has a toggle, and the toggles live in the daemon's settings rather
+than in the app, so a second Mac — or the Telegram bot, later — shares the same
+answer.
+
+- The pane tail in a `waiting` notification is stripped of everything that
+  draws a terminal and capped in length, so what you read is the question.
+- The task whose terminal is on screen in a focused window is never announced.
+  Telling someone what they are looking at is noise.
+- An agent that keeps asking while nobody answers does not restack. The daemon
+  already announces `waiting` only on entering it, and the app will not repeat
+  the same kind for the same task.
+- If macOS refuses permission, the app says so in the settings section and
+  carries on: the dashboard shows the same states either way.
+
+Notifications need this app to be open. Away from your Mac, the answer is the
+Telegram bot, which lives in the daemon and does not depend on any app being
+running.
+
 ## Terminals
 
 Opening a task's terminal attaches to its tmux session over a WebSocket. It is

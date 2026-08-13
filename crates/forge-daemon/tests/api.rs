@@ -83,6 +83,66 @@ async fn the_adapter_list_needs_a_token() {
 }
 
 #[tokio::test]
+async fn settings_round_trip_so_every_client_shares_them() {
+    let harness = Harness::new();
+
+    let (status, empty) = harness.get("/settings").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(empty["settings"], serde_json::json!({}));
+
+    let (status, saved) = harness
+        .patch(
+            "/settings",
+            serde_json::json!({ "notify.agent_waiting": "false", "worktree_root": "/trees" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["settings"]["notify.agent_waiting"], "false");
+
+    // A patch touches only the keys it names.
+    let (_, patched) = harness
+        .patch(
+            "/settings",
+            serde_json::json!({ "notify.agent_waiting": "true" }),
+        )
+        .await;
+    assert_eq!(patched["settings"]["notify.agent_waiting"], "true");
+    assert_eq!(patched["settings"]["worktree_root"], "/trees");
+
+    // Null clears a key rather than storing the word "null".
+    let (_, cleared) = harness
+        .patch("/settings", serde_json::json!({ "worktree_root": null }))
+        .await;
+    assert!(cleared["settings"].get("worktree_root").is_none());
+}
+
+#[tokio::test]
+async fn a_setting_cannot_become_a_file_store() {
+    let harness = Harness::new();
+
+    let (status, body) = harness
+        .patch("/settings", serde_json::json!({ "big": "x".repeat(5_000) }))
+        .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "bad_request");
+}
+
+#[tokio::test]
+async fn the_settings_need_a_token() {
+    let harness = Harness::new();
+
+    assert_eq!(
+        harness.unauthenticated("GET", "/settings").await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        harness.unauthenticated("PATCH", "/settings").await,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
 async fn every_other_endpoint_needs_the_right_token() {
     let harness = Harness::new();
 

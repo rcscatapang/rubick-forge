@@ -117,6 +117,21 @@ pub async fn instruction(
     Ok(StatusCode::ACCEPTED)
 }
 
+/// One session, whichever task it belongs to.
+///
+/// A terminal view knows a session id and nothing else; without this it cannot
+/// find out whose session it is showing.
+pub async fn session(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<i64>,
+) -> ApiResult<Json<Session>> {
+    state
+        .store
+        .session(id)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found(format!("there is no session with id {id}")))
+}
+
 /// Every run of a task, oldest first.
 pub async fn sessions(
     State(state): State<AppState>,
