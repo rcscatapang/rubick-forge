@@ -61,6 +61,17 @@ impl TmuxRuntime {
         }
     }
 
+    /// The binary this runtime drives, for anything that has to run tmux
+    /// itself rather than ask this type to.
+    pub fn binary(&self) -> &str {
+        &self.binary
+    }
+
+    /// The socket label, when this is a private server.
+    pub fn socket(&self) -> Option<&str> {
+        self.socket.as_deref()
+    }
+
     /// Run a specific tmux rather than whatever `PATH` finds first.
     pub fn with_binary(self, binary: impl Into<String>) -> Self {
         Self {

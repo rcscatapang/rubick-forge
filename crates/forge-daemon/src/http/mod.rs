@@ -8,6 +8,7 @@ mod extract;
 mod health;
 mod projects;
 mod tasks;
+mod terminal;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -71,6 +72,7 @@ pub fn router(state: AppState) -> Router {
         .route("/adapters", get(adapters::list))
         .route("/events", get(events::list))
         .route("/ws/events", get(events::stream))
+        .route("/ws/sessions/{id}/terminal", get(terminal::stream))
         .route("/projects", get(projects::list).post(projects::register))
         .route(
             "/projects/{id}",
