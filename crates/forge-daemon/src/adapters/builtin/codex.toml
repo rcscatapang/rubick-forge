@@ -49,5 +49,5 @@ args = ["--model", "{value}"]
 
 [[settings]]
 key = "extra_args"
-kind = "text"
+kind = "args"
 description = "Extra command-line arguments, split on spaces."

@@ -97,7 +97,20 @@ impl Daemon {
         let mut events = state.bus.subscribe();
 
         tokio::spawn(async move {
-            while let Ok(record) = events.recv().await {
+            loop {
+                let record = match events.recv().await {
+                    Ok(record) => record,
+                    // Falling behind costs the events that were missed, not
+                    // every event afterwards. Stopping here would silently
+                    // disable hooks for the daemon's life after one burst —
+                    // exactly the storm the bounded queue exists for.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                        tracing::warn!(missed, "hooks fell behind; skipping what was missed");
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                };
+
                 // A hook runs in the task's worktree where there is one, so it
                 // can just run git without being told where.
                 let cwd = record

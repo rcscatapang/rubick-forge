@@ -60,7 +60,15 @@ pub fn all() -> Vec<Arc<Adapter>> {
 /// Returns `None` rather than a default: a task naming an adapter that has gone
 /// away must say so, not quietly run something else.
 pub fn adapter(id: &AdapterId) -> Option<Arc<Adapter>> {
-    all().into_iter().find(|adapter| adapter.id() == id)
+    // Under the read lock rather than through `all()`, which would clone the
+    // whole registry for one lookup — and this runs on every status poll.
+    state()
+        .read()
+        .expect("the adapter registry lock is never poisoned")
+        .adapters
+        .iter()
+        .find(|adapter| adapter.id() == id)
+        .map(Arc::clone)
 }
 
 /// Every manifest that would not load, for `/health`.

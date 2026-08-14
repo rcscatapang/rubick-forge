@@ -37,7 +37,7 @@ async fn a_hook_is_handed_the_event_on_stdin() {
     let hook = script(temp.path(), "echo.sh", "cat");
 
     let payload = serde_json::to_string(&finished(12)).unwrap();
-    let outcome = hooks::run(&hook, &payload, None, Duration::from_secs(5))
+    let outcome = hooks::run(&hook, &payload, None, Duration::from_secs(5), &[])
         .await
         .unwrap();
 
@@ -54,7 +54,7 @@ async fn a_hook_runs_in_the_worktree_when_the_event_has_one() {
     std::fs::create_dir(&worktree).unwrap();
     let hook = script(temp.path(), "where.sh", "pwd");
 
-    let outcome = hooks::run(&hook, "{}", Some(&worktree), Duration::from_secs(5))
+    let outcome = hooks::run(&hook, "{}", Some(&worktree), Duration::from_secs(5), &[])
         .await
         .unwrap();
 
@@ -73,6 +73,7 @@ async fn a_hook_whose_worktree_is_gone_still_runs() {
         "{}",
         Some(&temp.path().join("cleaned-up")),
         Duration::from_secs(5),
+        &[],
     )
     .await
     .unwrap();
@@ -86,7 +87,7 @@ async fn a_hanging_hook_is_killed_at_the_timeout() {
     let hook = script(temp.path(), "hang.sh", "sleep 30");
 
     let started = Instant::now();
-    let error = hooks::run(&hook, "{}", None, Duration::from_millis(200))
+    let error = hooks::run(&hook, "{}", None, Duration::from_millis(200), &[])
         .await
         .unwrap_err();
 
@@ -104,9 +105,15 @@ async fn a_hook_that_reads_nothing_does_not_hang_the_daemon() {
     let temp = tempfile::tempdir().unwrap();
     let hook = script(temp.path(), "ignore.sh", "echo done");
 
-    let outcome = hooks::run(&hook, &"x".repeat(100_000), None, Duration::from_secs(5))
-        .await
-        .unwrap();
+    let outcome = hooks::run(
+        &hook,
+        &"x".repeat(100_000),
+        None,
+        Duration::from_secs(5),
+        &[],
+    )
+    .await
+    .unwrap();
 
     assert_eq!(outcome.output, "done");
 }
@@ -117,7 +124,7 @@ async fn a_failing_hook_is_recorded_rather_than_acted_on() {
     let temp = tempfile::tempdir().unwrap();
     let hook = script(temp.path(), "fail.sh", "echo went wrong >&2; exit 3");
 
-    let outcome = hooks::run(&hook, "{}", None, Duration::from_secs(5))
+    let outcome = hooks::run(&hook, "{}", None, Duration::from_secs(5), &[])
         .await
         .unwrap();
 
@@ -134,6 +141,7 @@ async fn a_hook_that_is_not_there_is_an_error_not_a_panic() {
         "{}",
         None,
         Duration::from_secs(5),
+        &[],
     )
     .await
     .unwrap_err();
@@ -213,7 +221,7 @@ task_finished = "slow.sh"
 
     // One running plus one queued. The other 48 were refused outright rather
     // than held, which is the whole point of a bounded queue.
-    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
 
     let ran = std::fs::read_to_string(&counter)
         .unwrap_or_default()
@@ -243,4 +251,78 @@ async fn a_hook_pointing_outside_its_directory_is_refused() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     assert!(!marker.exists(), "a path escaped the hooks directory");
+}
+
+#[tokio::test]
+async fn no_more_than_the_concurrency_cap_run_at_once() {
+    // The cap is separate from the queue bound: five may be admitted while
+    // only one runs, and the other four wait rather than being dropped.
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("log");
+    script(
+        temp.path(),
+        "trace.sh",
+        &format!(
+            "echo start >> {0}; sleep 0.3; echo end >> {0}",
+            log.display()
+        ),
+    );
+
+    let config: HooksConfig = toml::from_str(
+        r#"
+concurrency = 1
+queue = 5
+
+[on]
+task_finished = "trace.sh"
+"#,
+    )
+    .unwrap();
+    let hooks = Arc::new(Hooks::new(config, temp.path().to_path_buf()));
+
+    for _ in 0..4 {
+        hooks.fire(&finished(1), None);
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let lines: Vec<String> = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+
+    assert!(lines.len() >= 4, "queued hooks were dropped: {lines:?}");
+
+    // Every start is followed by its own end. Two in a row would mean two ran
+    // at the same time.
+    for pair in lines.chunks(2) {
+        assert_eq!(pair, ["start", "end"], "hooks overlapped: {lines:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_hook_is_told_what_happened_in_its_environment_too() {
+    // The same facts as the JSON on stdin, for a script too short to parse it.
+    let temp = tempfile::tempdir().unwrap();
+    let hook = script(
+        temp.path(),
+        "env.sh",
+        "echo \"$FORGE_EVENT_KIND $FORGE_EVENT_ID $FORGE_TASK_ID\"",
+    );
+
+    let outcome = hooks::run(
+        &hook,
+        "{}",
+        None,
+        Duration::from_secs(5),
+        &[
+            ("FORGE_EVENT_KIND", "task_finished".to_owned()),
+            ("FORGE_EVENT_ID", "41".to_owned()),
+            ("FORGE_TASK_ID", "12".to_owned()),
+        ],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.output, "task_finished 41 12");
 }

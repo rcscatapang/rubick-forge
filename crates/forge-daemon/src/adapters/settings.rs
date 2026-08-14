@@ -75,6 +75,7 @@ fn matches_kind(def: &SettingDef, value: &Value) -> bool {
         SettingKind::Text => value.is_string(),
         SettingKind::Number => value.is_number(),
         SettingKind::Flag => value.is_boolean(),
+        SettingKind::Args => value.is_string(),
     }
 }
 
@@ -83,6 +84,7 @@ fn expected(kind: SettingKind) -> &'static str {
         SettingKind::Text => "a string",
         SettingKind::Number => "a number",
         SettingKind::Flag => "a boolean",
+        SettingKind::Args => "a string of arguments",
     }
 }
 

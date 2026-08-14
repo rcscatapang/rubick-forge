@@ -48,11 +48,6 @@ version_args = ["--version"] # what makes it print a version, for /health
 # Extra argv elements at launch, before the prompt.
 launch_args = ["--no-auto-commits"]
 
-# Where the initial prompt goes:
-#   "argument" (default) — appended as the last argv element
-#   "typed"              — not passed at launch; sent once the agent is up
-prompt = "argument"
-
 [injection]
 paste = true                 # paste through a tmux buffer rather than sending
                              # keys. What any TUI needs: pasted text cannot be
@@ -83,10 +78,19 @@ markers = ["> ", "? for help"]
 
 [[settings]]
 key = "model"
-kind = "text"                # text | number | flag
+kind = "text"                # text | number | flag | args
 description = "Model to run."
 args = ["--model", "{value}"]
+
+[[settings]]
+key = "extra_args"
+kind = "args"                # the value is split on whitespace into argv
+description = "Extra command-line arguments."
 ```
+
+The initial prompt is appended as the last argv element. There is no way to
+have it typed in after launch instead — that was in an early draft of this
+format and removed rather than shipped as a documented option that did nothing.
 
 The built-ins live in `crates/forge-daemon/src/adapters/builtin/` and are worth
 reading as worked examples.
@@ -115,6 +119,15 @@ to be told about.
 `error` markers must match **the CLI's own failures only**. If `error:` is in
 your list, ordinary compiler output from a working agent will read as a broken
 session.
+
+### Key lists are checked, not escaped
+
+`answers.approve`, `answers.deny` and `injection.submit_keys` reach
+`tmux send-keys`. tmux splits its *own* argument list on a bare `;` before `--`
+can protect anything after it, so a manifest saying
+`approve = [";", "kill-server"]` would be a command into the tmux server rather
+than a keystroke. Those lists are therefore restricted to plain key names and a
+manifest using anything else is refused.
 
 ### `permission_markers`
 
@@ -193,7 +206,8 @@ version.
 |---|---|
 | **stdin** | The event as JSON, then end-of-input |
 | **cwd** | The task's worktree when the event has one, else the daemon's |
-| **stdout/stderr** | Captured, capped, and logged |
+| **env** | `FORGE_EVENT_KIND`, `FORGE_EVENT_ID`, and `FORGE_TASK_ID` when the event has a task. Everything else is inherited from the daemon. |
+| **stdout/stderr** | Captured, capped, and written to the daemon log — not the activity feed |
 | **exit code** | Recorded and **never acted on** |
 
 ```sh
@@ -210,9 +224,11 @@ Scripts must be executable (`chmod +x`), and are named by **filename only** —
 
 - **Killed at the timeout** (30 s default). A hook that hangs must not
   accumulate.
-- **Bounded queue.** Beyond `concurrency + queue`, new hooks are **dropped with
-  a log line** rather than held. A fleet of agents all finishing at once should
-  cost log lines, not a fork bomb on the Mac your agents are running on.
+- **Two separate limits.** `concurrency` is how many run at once; hooks
+  admitted beyond that **wait**. `queue` is how many may wait. Past
+  `concurrency + queue`, new hooks are **dropped with a log line** rather than
+  held — a fleet of agents all finishing at once should cost log lines, not a
+  fork bomb on the Mac your agents are running on.
 - **Fire and forget.** A hook cannot veto, delay, or alter anything. That is the
   line between "run a script on this event" and a plugin API, and it is what
   makes a broken hook harmless.

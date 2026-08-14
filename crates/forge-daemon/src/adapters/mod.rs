@@ -14,7 +14,7 @@ pub mod status;
 use forge_core::{AdapterId, BinaryStatus, Task};
 use serde_json::{Map, Value};
 
-use manifest::{Manifest, PromptMode, SettingKind};
+use manifest::{Manifest, SettingKind};
 use markers::{MarkerSet, StatusPatterns};
 
 pub use registry::{adapter, all, load_errors, reload, LoadError};
@@ -117,14 +117,21 @@ impl Adapter {
         let mut args = Vec::new();
 
         for setting in &self.manifest.settings {
-            if setting.args.is_empty() {
-                // Read some other way; `extra_args` is the one built-in case.
-                continue;
-            }
-
             let Some(value) = settings.get(&setting.key) else {
                 continue;
             };
+            if setting.args.is_empty() && setting.kind != SettingKind::Args {
+                continue;
+            }
+
+            // Split into argv elements rather than substituted, because that
+            // is what "extra arguments" means. Still never a shell string.
+            if setting.kind == SettingKind::Args {
+                if let Value::String(extra) = value {
+                    args.extend(extra.split_whitespace().map(str::to_owned));
+                }
+                continue;
+            }
 
             let filled = match (setting.kind, value) {
                 (SettingKind::Text, Value::String(text)) => text.clone(),
@@ -143,7 +150,6 @@ impl Adapter {
             );
         }
 
-        args.extend(extra_args(settings));
         args
     }
 
@@ -162,11 +168,11 @@ impl Adapter {
         );
         command.extend(self.launch_args(settings, task));
 
-        if self.manifest.prompt == PromptMode::Argument {
-            if let Some(prompt) = task.initial_prompt.as_deref() {
-                if !prompt.trim().is_empty() {
-                    command.push(prompt.to_owned());
-                }
+        // The prompt goes last and as its own argv element, so nothing in it
+        // can be read as an option.
+        if let Some(prompt) = task.initial_prompt.as_deref() {
+            if !prompt.trim().is_empty() {
+                command.push(prompt.to_owned());
             }
         }
 
@@ -177,15 +183,6 @@ impl Adapter {
     pub async fn binary_check(&self) -> BinaryStatus {
         crate::binaries::probe_with(&self.manifest.binary, &self.manifest.version_args).await
     }
-}
-
-/// Whatever the user put in `extra_args`, split into argv entries.
-fn extra_args(settings: &Map<String, Value>) -> Vec<String> {
-    settings
-        .get("extra_args")
-        .and_then(Value::as_str)
-        .map(|extra| extra.split_whitespace().map(str::to_owned).collect())
-        .unwrap_or_default()
 }
 
 /// Whether a pane looks like it is asking permission, whichever CLI drew it.

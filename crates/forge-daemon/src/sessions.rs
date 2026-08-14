@@ -116,15 +116,31 @@ impl<R: SessionRuntime> SessionManager<R> {
             .live_session(task_id)?
             .ok_or(SessionManagerError::NotRunning(task_id))?;
 
-        // Through a paste buffer, then a separate Enter: the text may contain
-        // newlines and anything else, and none of it may be read as keys.
-        self.runtime
-            .paste(&session.tmux_name, text)
-            .await
-            .map_err(|err| SessionManagerError::Runtime(err.to_string()))?;
+        // How the text arrives is the adapter's business: a manifest declares
+        // whether its CLI wants a paste buffer or keystrokes, and what submits.
+        let injection = self.adapter_for(task_id)?.injection().clone();
 
+        if injection.paste {
+            // Through a paste buffer: the text may contain newlines and
+            // anything else, and none of it may be read as key bindings.
+            self.runtime
+                .paste(&session.tmux_name, text)
+                .await
+                .map_err(|err| SessionManagerError::Runtime(err.to_string()))?;
+        } else {
+            self.runtime
+                .send_keys(&session.tmux_name, &[text])
+                .await
+                .map_err(|err| SessionManagerError::Runtime(err.to_string()))?;
+        }
+
+        if injection.submit_keys.is_empty() {
+            return Ok(());
+        }
+
+        let keys: Vec<&str> = injection.submit_keys.iter().map(String::as_str).collect();
         self.runtime
-            .send_keys(&session.tmux_name, &["Enter"])
+            .send_keys(&session.tmux_name, &keys)
             .await
             .map_err(|err| SessionManagerError::Runtime(err.to_string()))
     }

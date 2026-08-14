@@ -93,8 +93,12 @@ pub fn is_script_name(name: &str) -> bool {
 pub struct Hooks {
     config: HooksConfig,
     dir: PathBuf,
-    /// Caps how many run at once, and — through `try_acquire` — how many wait.
-    slots: Arc<Semaphore>,
+    /// How many hooks may be alive at all — running plus waiting. Taken in
+    /// `fire`, so a storm is refused at the door rather than queued forever.
+    admitted: Arc<Semaphore>,
+    /// How many may be *running*. Awaited inside the task, so the difference
+    /// between this and `admitted` is the queue.
+    running: Arc<Semaphore>,
     queue: usize,
 }
 
@@ -124,10 +128,9 @@ impl Hooks {
     }
 
     pub fn new(config: HooksConfig, dir: PathBuf) -> Self {
-        let permits = config.concurrency() + config.queue();
-
         Self {
-            slots: Arc::new(Semaphore::new(permits)),
+            admitted: Arc::new(Semaphore::new(config.concurrency() + config.queue())),
+            running: Arc::new(Semaphore::new(config.concurrency())),
             queue: config.queue(),
             config,
             dir,
@@ -155,9 +158,9 @@ impl Hooks {
             return;
         }
 
-        // Acquired here rather than in the task, so a storm is refused now
-        // instead of piling up tasks that all wait.
-        let Ok(permit) = Arc::clone(&self.slots).try_acquire_owned() else {
+        // Admission is decided here rather than in the task, so a storm is
+        // refused at the door instead of piling up tasks that all wait.
+        let Ok(admission) = Arc::clone(&self.admitted).try_acquire_owned() else {
             tracing::warn!(
                 kind = %record.event.kind(),
                 queue = self.queue,
@@ -170,12 +173,28 @@ impl Hooks {
         let timeout = self.config.timeout();
         let payload = serde_json::to_string(record).unwrap_or_else(|_| "{}".to_owned());
         let kind = record.event.kind();
+        let running = Arc::clone(&self.running);
+
+        let mut env = vec![
+            ("FORGE_EVENT_KIND", kind.to_string()),
+            ("FORGE_EVENT_ID", record.id.to_string()),
+        ];
+        if let Some(task_id) = record.event.task_id() {
+            env.push(("FORGE_TASK_ID", task_id.to_string()));
+        }
 
         tokio::spawn(async move {
-            // Bound, not `let _ =`: that drops immediately and would release
-            // the slot before the hook had run, so nothing would be bounded.
-            let _permit = permit;
-            let outcome = run(&path, &payload, cwd.as_deref(), timeout).await;
+            // Bound rather than `let _ =`, which drops immediately: each permit
+            // has to outlive the hook or neither bound holds.
+            let _admission = admission;
+
+            // Waited for, not tried: this is the queue. A hook admitted while
+            // `concurrency` others are running sits here until one finishes.
+            let Ok(_slot) = running.acquire_owned().await else {
+                return;
+            };
+
+            let outcome = run(&path, &payload, cwd.as_deref(), timeout, &env).await;
 
             match outcome {
                 Ok(finished) => tracing::info!(
@@ -208,6 +227,7 @@ pub async fn run(
     payload: &str,
     cwd: Option<&Path>,
     timeout: Duration,
+    env: &[(&str, String)],
 ) -> Result<Finished, String> {
     use tokio::io::AsyncWriteExt;
 
@@ -223,9 +243,10 @@ pub async fn run(
         command.current_dir(cwd);
     }
 
-    // Told what happened rather than asked anything. A hook's exit code is
-    // recorded and never acted on.
-    command.env("FORGE_EVENT_KIND", "");
+    // The same facts as the JSON on stdin, for a script too short to parse it.
+    for (name, value) in env {
+        command.env(name, value);
+    }
 
     let mut child = command
         .spawn()

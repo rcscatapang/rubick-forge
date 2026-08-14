@@ -45,10 +45,6 @@ pub struct Manifest {
     #[serde(default)]
     pub launch_args: Vec<String>,
 
-    /// How the initial prompt reaches the agent.
-    #[serde(default)]
-    pub prompt: PromptMode,
-
     /// How an instruction is typed into a running agent.
     #[serde(default)]
     pub injection: Injection,
@@ -68,17 +64,6 @@ pub struct Manifest {
 
 fn version_args() -> Vec<String> {
     vec!["--version".to_owned()]
-}
-
-/// Where the initial prompt goes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum PromptMode {
-    /// Appended as the last argv element. What both built-ins take.
-    #[default]
-    Argument,
-    /// Not passed at launch; sent as an instruction once the agent is up.
-    Typed,
 }
 
 /// How text is typed into a running agent.
@@ -163,6 +148,11 @@ pub enum SettingKind {
     Text,
     Number,
     Flag,
+    /// A string split on whitespace into one argv element each.
+    ///
+    /// For a CLI's "and anything else you want to pass" setting. Declared like
+    /// any other, so no key is special to the engine.
+    Args,
 }
 
 /// Why a manifest was refused.
@@ -198,6 +188,11 @@ pub enum ManifestError {
     },
     #[error("the setting `{0}` is declared twice")]
     DuplicateSetting(String),
+    #[error(
+        "`{key}` in {field} is not a usable tmux key name. tmux splits its own \
+         arguments on `;`, so a key list is checked rather than escaped."
+    )]
+    UnusableKey { field: &'static str, key: String },
 }
 
 /// The placeholders a template may use.
@@ -241,7 +236,7 @@ impl Manifest {
                 if marker.trim().is_empty() {
                     return Err(ManifestError::EmptyMarker(set.status));
                 }
-                if marker.len() > MAX_MARKER {
+                if marker.chars().count() > MAX_MARKER {
                     return Err(ManifestError::MarkerTooLong {
                         status: set.status,
                         marker: marker.clone(),
@@ -266,6 +261,17 @@ impl Manifest {
             check_placeholders(template)?;
         }
 
+        // Key lists reach `tmux send-keys`, and tmux splits its *own* argument
+        // list on a bare `;` before `--` can protect anything after it. A
+        // manifest saying `approve = [";", "kill-server"]` would otherwise be a
+        // command injection into the tmux server.
+        //
+        // `version_args` are not checked: they are argv to a process, which is
+        // safe however they are spelled, and `--version` starts with a dash.
+        check_keys("answers.approve", &self.answers.approve)?;
+        check_keys("answers.deny", &self.answers.deny)?;
+        check_keys("injection.submit_keys", &self.injection.submit_keys)?;
+
         Ok(())
     }
 
@@ -279,6 +285,26 @@ impl Manifest {
     }
 }
 
+/// Whether every entry is a plain word tmux and a CLI will take as one token.
+fn check_keys(field: &'static str, keys: &[String]) -> Result<(), ManifestError> {
+    for key in keys {
+        let usable = !key.is_empty()
+            && !key.starts_with('-')
+            && key.chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '+' | '/' | '.' | '=')
+            });
+
+        if !usable {
+            return Err(ManifestError::UnusableKey {
+                field,
+                key: key.clone(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
 /// Every `{name}` in `template` must be one this daemon fills.
 fn check_placeholders(template: &str) -> Result<(), ManifestError> {
     let mut rest = template;
@@ -286,8 +312,11 @@ fn check_placeholders(template: &str) -> Result<(), ManifestError> {
     while let Some(open) = rest.find('{') {
         let after = &rest[open + 1..];
         let Some(close) = after.find('}') else {
-            // An unclosed brace is a literal brace, which some CLIs do take.
-            return Ok(());
+            // A lone `{` is a literal brace, which some CLIs do take. The rest
+            // of the template is still checked: stopping here let
+            // `"{ {moddel}"` through.
+            rest = after;
+            continue;
         };
 
         let name = &after[..close];
@@ -310,11 +339,42 @@ fn check_placeholders(template: &str) -> Result<(), ManifestError> {
 /// shell anywhere on this path, so a value containing `;`, `$(…)` or a newline
 /// is data and stays data.
 pub fn fill(template: &str, value: &str, task_id: i64, task_title: &str) -> String {
-    template
-        .replace("{value}", value)
-        .replace("{prompt}", value)
-        .replace("{task_id}", &task_id.to_string())
-        .replace("{task_title}", task_title)
+    let task_id = task_id.to_string();
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+
+    // One pass, not four `replace`s: a *value* containing `{task_title}` must
+    // stay those characters rather than being substituted in turn.
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+
+        let Some(close) = after.find('}') else {
+            out.push('{');
+            rest = after;
+            continue;
+        };
+
+        out.push_str(match &after[..close] {
+            "value" | "prompt" => value,
+            "task_id" => &task_id,
+            "task_title" => task_title,
+            // Validation refuses these, so this is a manifest loaded by an
+            // older daemon; leaving it alone is better than dropping it.
+            other => {
+                out.push('{');
+                out.push_str(other);
+                out.push('}');
+                rest = &after[close + 1..];
+                continue;
+            }
+        });
+
+        rest = &after[close + 1..];
+    }
+
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -340,7 +400,6 @@ markers = ["Do you want to"]
         assert_eq!(manifest.binary, "aider");
         // Everything else has a default that suits an ordinary TUI.
         assert_eq!(manifest.version_args, ["--version"]);
-        assert_eq!(manifest.prompt, PromptMode::Argument);
         assert!(manifest.injection.paste);
         assert_eq!(manifest.injection.submit_keys, ["Enter"]);
         assert_eq!(manifest.answers.approve, ["1", "Enter"]);
@@ -465,6 +524,68 @@ description = \"again\"
             fill("--model={value}", hostile, 1, "t"),
             format!("--model={hostile}")
         );
+    }
+
+    #[test]
+    fn a_newline_in_a_value_stays_inside_one_argv_element() {
+        let hostile = "one\nrm -rf ~\n";
+
+        assert_eq!(fill("{value}", hostile, 1, "t"), hostile);
+    }
+
+    #[test]
+    fn a_value_that_looks_like_a_template_is_not_expanded_again() {
+        // Data must not become template: a model name containing
+        // `{task_title}` is those characters.
+        assert_eq!(
+            fill("--model={value}", "{task_title}", 1, "Fix it"),
+            "--model={task_title}"
+        );
+    }
+
+    #[test]
+    fn a_key_list_cannot_smuggle_a_tmux_command() {
+        // tmux splits its own argument list on a bare `;`, so these are checked
+        // rather than escaped.
+        for bad in [r#"approve = [";", "kill-server"]"#, r#"deny = ["-X"]"#] {
+            let (head, status) = MINIMAL.split_once("[[status]]").expect("a status table");
+            let approve = if bad.starts_with("approve") {
+                bad
+            } else {
+                r#"approve = ["1"]"#
+            };
+            let deny = if bad.starts_with("deny") {
+                bad
+            } else {
+                r#"deny = ["Escape"]"#
+            };
+            let text = format!("{head}[answers]\n{approve}\n{deny}\n\n[[status]]{status}");
+
+            assert!(
+                matches!(parse(&text), Err(ManifestError::UnusableKey { .. })),
+                "{bad} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ordinary_key_list_is_accepted() {
+        let (head, status) = MINIMAL.split_once("[[status]]").expect("a status table");
+        let text = format!(
+            "{head}[answers]\napprove = [\"1\", \"Enter\"]\ndeny = [\"Escape\", \"C-c\"]\n\n[[status]]{status}"
+        );
+
+        assert!(parse(&text).is_ok(), "{:?}", parse(&text));
+    }
+
+    #[test]
+    fn an_unclosed_brace_does_not_hide_a_typo_after_it() {
+        let text = with_top_level(r#"launch_args = ["{ {moddel}"]"#);
+
+        assert!(matches!(
+            parse(&text),
+            Err(ManifestError::UnknownPlaceholder { .. })
+        ));
     }
 
     #[test]

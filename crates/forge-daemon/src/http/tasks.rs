@@ -337,6 +337,15 @@ pub async fn create(
         return Err(ApiError::bad_request("a task needs a title"));
     }
 
+    // Refused here rather than at start: a task nobody can run is not a task,
+    // and finding out later means a row to clean up.
+    if crate::adapters::adapter(&request.adapter).is_none() {
+        return Err(ApiError::bad_request(format!(
+            "no adapter called `{}` is loaded; see /adapters",
+            request.adapter
+        )));
+    }
+
     // Answered before anything is created, so a retry whose first answer was
     // lost gets the task it already made rather than a second one.
     if let Some(key) = request.idempotency_key.as_deref() {
