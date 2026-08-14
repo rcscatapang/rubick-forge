@@ -16,8 +16,16 @@ jobs:
   rust:
     name: Rust (macOS)
     runs-on: macos-latest
+    env:
+      # `tmux attach` refuses to open a terminal it cannot clear, and the
+      # runner sets no TERM, so the attach test would never see a client.
+      TERM: xterm-256color
     steps:
       - uses: actions/checkout@v4
+
+      # The session tests drive a real tmux server; the runner image has no tmux.
+      - name: Install tmux
+        run: brew install tmux
 
       - name: Install Rust toolchain
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
