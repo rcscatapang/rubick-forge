@@ -20,6 +20,30 @@ fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
     path
 }
 
+/// A timeout for hooks that finish immediately, where the timeout is not what
+/// the test is about. Long enough that a loaded machine cannot reach it.
+const PLENTY: Duration = Duration::from_secs(30);
+
+/// The lines a hook script has appended so far.
+fn lines(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Wait for something to have happened rather than sleeping a fixed amount.
+/// These tests spawn real processes, and a busy machine is slower than any
+/// margin worth hard-coding.
+async fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !done() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 fn finished(task_id: i64) -> EventRecord {
     EventRecord {
         id: 1,
@@ -37,7 +61,7 @@ async fn a_hook_is_handed_the_event_on_stdin() {
     let hook = script(temp.path(), "echo.sh", "cat");
 
     let payload = serde_json::to_string(&finished(12)).unwrap();
-    let outcome = hooks::run(&hook, &payload, None, Duration::from_secs(5), &[])
+    let outcome = hooks::run(&hook, &payload, None, PLENTY, &[])
         .await
         .unwrap();
 
@@ -54,7 +78,7 @@ async fn a_hook_runs_in_the_worktree_when_the_event_has_one() {
     std::fs::create_dir(&worktree).unwrap();
     let hook = script(temp.path(), "where.sh", "pwd");
 
-    let outcome = hooks::run(&hook, "{}", Some(&worktree), Duration::from_secs(5), &[])
+    let outcome = hooks::run(&hook, "{}", Some(&worktree), PLENTY, &[])
         .await
         .unwrap();
 
@@ -72,7 +96,7 @@ async fn a_hook_whose_worktree_is_gone_still_runs() {
         &hook,
         "{}",
         Some(&temp.path().join("cleaned-up")),
-        Duration::from_secs(5),
+        PLENTY,
         &[],
     )
     .await
@@ -105,15 +129,9 @@ async fn a_hook_that_reads_nothing_does_not_hang_the_daemon() {
     let temp = tempfile::tempdir().unwrap();
     let hook = script(temp.path(), "ignore.sh", "echo done");
 
-    let outcome = hooks::run(
-        &hook,
-        &"x".repeat(100_000),
-        None,
-        Duration::from_secs(5),
-        &[],
-    )
-    .await
-    .unwrap();
+    let outcome = hooks::run(&hook, &"x".repeat(100_000), None, PLENTY, &[])
+        .await
+        .unwrap();
 
     assert_eq!(outcome.output, "done");
 }
@@ -124,9 +142,7 @@ async fn a_failing_hook_is_recorded_rather_than_acted_on() {
     let temp = tempfile::tempdir().unwrap();
     let hook = script(temp.path(), "fail.sh", "echo went wrong >&2; exit 3");
 
-    let outcome = hooks::run(&hook, "{}", None, Duration::from_secs(5), &[])
-        .await
-        .unwrap();
+    let outcome = hooks::run(&hook, "{}", None, PLENTY, &[]).await.unwrap();
 
     assert_eq!(outcome.code, Some(3));
     assert!(outcome.output.contains("went wrong"));
@@ -136,15 +152,9 @@ async fn a_failing_hook_is_recorded_rather_than_acted_on() {
 async fn a_hook_that_is_not_there_is_an_error_not_a_panic() {
     let temp = tempfile::tempdir().unwrap();
 
-    let error = hooks::run(
-        &temp.path().join("missing.sh"),
-        "{}",
-        None,
-        Duration::from_secs(5),
-        &[],
-    )
-    .await
-    .unwrap_err();
+    let error = hooks::run(&temp.path().join("missing.sh"), "{}", None, PLENTY, &[])
+        .await
+        .unwrap_err();
 
     assert!(error.contains("cannot run it"), "{error}");
 }
@@ -220,14 +230,13 @@ task_finished = "slow.sh"
     }
 
     // One running plus one queued. The other 48 were refused outright rather
-    // than held, which is the whole point of a bounded queue.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // than held, which is the whole point of a bounded queue. Wait for the
+    // first to start, then leave a window in which anything wrongly held would
+    // have run and appended its own line.
+    wait_for("the first hook to start", || !lines(&counter).is_empty()).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let ran = std::fs::read_to_string(&counter)
-        .unwrap_or_default()
-        .lines()
-        .count();
-    assert!(ran >= 1, "nothing ran at all");
+    let ran = lines(&counter).len();
     assert!(ran <= 2, "{ran} of 50 ran; the queue is not bounded");
 }
 
@@ -283,15 +292,10 @@ task_finished = "trace.sh"
     for _ in 0..4 {
         hooks.fire(&finished(1), None);
     }
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Four hooks one at a time: a start and an end each, and none dropped.
+    wait_for("the four queued hooks to run", || lines(&log).len() >= 8).await;
 
-    let lines: Vec<String> = std::fs::read_to_string(&log)
-        .unwrap_or_default()
-        .lines()
-        .map(str::to_owned)
-        .collect();
-
-    assert!(lines.len() >= 4, "queued hooks were dropped: {lines:?}");
+    let lines = lines(&log);
 
     // Every start is followed by its own end. Two in a row would mean two ran
     // at the same time.
@@ -314,7 +318,7 @@ async fn a_hook_is_told_what_happened_in_its_environment_too() {
         &hook,
         "{}",
         None,
-        Duration::from_secs(5),
+        PLENTY,
         &[
             ("FORGE_EVENT_KIND", "task_finished".to_owned()),
             ("FORGE_EVENT_ID", "41".to_owned()),
