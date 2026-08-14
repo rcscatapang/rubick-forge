@@ -37,13 +37,49 @@ async fn health_answers_without_a_token() {
     assert_eq!(body["version"], "0.1.0-test");
     assert!(body["uptime_secs"].is_number());
     assert!(body["machine"].is_string());
+    // The tools the daemon needs, then the agent CLIs it can drive.
     let names: Vec<&str> = body["binaries"]
         .as_array()
         .unwrap()
         .iter()
         .map(|b| b["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["tmux", "git"]);
+    assert_eq!(names, ["tmux", "git", "claude", "codex"]);
+}
+
+#[tokio::test]
+async fn the_adapters_a_daemon_can_drive_are_listed_with_their_settings() {
+    let harness = Harness::new();
+
+    let (status, body) = harness.get("/adapters").await;
+
+    assert_eq!(status, StatusCode::OK);
+    let adapters = body["adapters"].as_array().unwrap();
+    assert_eq!(adapters.len(), 2);
+
+    let ids: Vec<&str> = adapters.iter().map(|a| a["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["claude-code", "codex"]);
+
+    assert_eq!(adapters[0]["name"], "Claude Code");
+    assert_eq!(adapters[0]["binary"]["name"], "claude");
+    assert!(adapters[0]["binary"]["ok"].is_boolean());
+
+    let settings = adapters[0]["settings"].as_array().unwrap();
+    assert!(settings.iter().any(|s| s["key"] == "model"));
+    assert!(settings.iter().all(|s| s["kind"].is_string()));
+    assert!(settings
+        .iter()
+        .all(|s| !s["description"].as_str().unwrap().is_empty()));
+}
+
+#[tokio::test]
+async fn the_adapter_list_needs_a_token() {
+    let harness = Harness::new();
+
+    assert_eq!(
+        harness.unauthenticated("GET", "/adapters").await,
+        StatusCode::UNAUTHORIZED
+    );
 }
 
 #[tokio::test]

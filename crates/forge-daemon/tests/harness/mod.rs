@@ -84,6 +84,10 @@ impl Harness {
         &self.state.bus
     }
 
+    pub fn store(&self) -> &Store {
+        &self.state.store
+    }
+
     pub async fn send(&self, request: Request<Body>) -> (StatusCode, Value) {
         let response = router(self.state.clone()).oneshot(request).await.unwrap();
         let status = response.status();

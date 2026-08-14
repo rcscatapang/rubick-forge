@@ -1,5 +1,6 @@
 //! The HTTP/WS surface. Everything but `/health` needs a bearer token.
 
+mod adapters;
 pub mod auth;
 pub mod error;
 mod events;
@@ -67,6 +68,7 @@ impl AppState {
 /// ones; `/health` is added after it on purpose.
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/adapters", get(adapters::list))
         .route("/events", get(events::list))
         .route("/ws/events", get(events::stream))
         .route("/projects", get(projects::list).post(projects::register))
@@ -87,6 +89,10 @@ pub fn router(state: AppState) -> Router {
         .route("/tasks/{id}/start", axum::routing::post(tasks::start))
         .route("/tasks/{id}/stop", axum::routing::post(tasks::stop))
         .route("/tasks/{id}/restart", axum::routing::post(tasks::restart))
+        .route(
+            "/tasks/{id}/instruction",
+            axum::routing::post(tasks::instruction),
+        )
         .route(
             "/tasks/{id}/worktree/cleanup",
             axum::routing::post(tasks::cleanup_worktree),

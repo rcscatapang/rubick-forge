@@ -7,6 +7,8 @@
 use forge_core::{AdapterId, AdapterSettings};
 use serde_json::Value;
 
+use super::{SettingDef, SettingKind};
+
 /// A settings blob a project cannot be saved with.
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsError {
@@ -20,6 +22,13 @@ pub enum SettingsError {
         key: String,
         found: String,
     },
+    #[error("`{adapter}.{key}` must be {expected}, not {found}")]
+    WrongKind {
+        adapter: AdapterId,
+        key: String,
+        expected: &'static str,
+        found: String,
+    },
 }
 
 /// Check a blob that has already parsed into [`AdapterSettings`].
@@ -31,6 +40,8 @@ pub fn validate(settings: &AdapterSettings) -> Result<(), SettingsError> {
         let Some(values) = settings.get(adapter) else {
             continue;
         };
+        let schema = super::adapter(adapter).settings_schema();
+
         for (key, value) in values {
             if !is_scalar(value) {
                 return Err(SettingsError::UnusableValue {
@@ -39,9 +50,39 @@ pub fn validate(settings: &AdapterSettings) -> Result<(), SettingsError> {
                     found: describe(value),
                 });
             }
+
+            // A key the adapter documents has to be the kind it documents.
+            // One it does not is kept as given, so a setting added ahead of
+            // daemon support is not lost.
+            if let Some(def) = schema.iter().find(|def| def.key == key) {
+                if !matches_kind(def, value) {
+                    return Err(SettingsError::WrongKind {
+                        adapter,
+                        key: key.clone(),
+                        expected: expected(def.kind),
+                        found: describe(value),
+                    });
+                }
+            }
         }
     }
     Ok(())
+}
+
+fn matches_kind(def: &SettingDef, value: &Value) -> bool {
+    match def.kind {
+        SettingKind::Text => value.is_string(),
+        SettingKind::Number => value.is_number(),
+        SettingKind::Flag => value.is_boolean(),
+    }
+}
+
+fn expected(kind: SettingKind) -> &'static str {
+    match kind {
+        SettingKind::Text => "a string",
+        SettingKind::Number => "a number",
+        SettingKind::Flag => "a boolean",
+    }
 }
 
 /// Settings become argv entries, so anything that is not a scalar has no
@@ -110,6 +151,17 @@ mod tests {
     #[test]
     fn an_empty_blob_is_fine() {
         assert!(parse(json!({})).unwrap().get(AdapterId::Codex).is_none());
+    }
+
+    #[test]
+    fn a_documented_setting_must_be_the_kind_it_is_documented_as() {
+        let err = parse(json!({ "claude-code": { "model": 7 } })).unwrap_err();
+
+        assert!(
+            matches!(err, SettingsError::WrongKind { ref key, .. } if key == "model"),
+            "{err}"
+        );
+        assert!(parse(json!({ "claude-code": { "model": "opus" } })).is_ok());
     }
 
     #[test]

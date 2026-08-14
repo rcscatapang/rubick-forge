@@ -112,6 +112,34 @@ export interface SessionList {
   sessions: Session[];
 }
 
+/** What kind of value an adapter setting takes. */
+export type SettingKind = "text" | "number" | "flag";
+
+/** One setting an adapter understands. */
+export interface SettingDef {
+  key: string;
+  kind: SettingKind;
+  description: string;
+}
+
+/** One entry of `GET /adapters`. */
+export interface AdapterInfo {
+  id: AdapterId;
+  name: string;
+  binary: BinaryStatus;
+  settings: SettingDef[];
+}
+
+/** The body of `GET /adapters`. */
+export interface AdapterList {
+  adapters: AdapterInfo[];
+}
+
+/** The body of `POST /tasks/:id/instruction`. */
+export interface InstructionRequest {
+  text: string;
+}
+
 /** The body of `POST /tasks`. */
 export interface CreateTaskRequest {
   project_id: number;
