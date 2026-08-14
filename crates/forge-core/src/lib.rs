@@ -12,7 +12,7 @@ mod health;
 mod status;
 mod timestamp;
 
-pub use adapter::{AdapterId, UnknownAdapterId};
+pub use adapter::{AdapterId, UnknownAdapterId, CLAUDE_CODE, CODEX};
 pub use entity::{
     task_branch_name, tmux_session_name, AdapterSettings, ChecksState, Project, QueueState,
     QueuedTask, Session, Task, TaskGitHub,
@@ -21,6 +21,6 @@ pub use event::{
     EventDecodeError, EventKind, EventRecord, ForgeEvent, StopReason, UnknownEventKind,
 };
 pub use git::GitStatus;
-pub use health::{BinaryStatus, Health};
+pub use health::{AdapterLoadError, BinaryStatus, Health};
 pub use status::{AgentStatus, UnknownAgentStatus};
 pub use timestamp::{InvalidTimestamp, Timestamp};

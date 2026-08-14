@@ -22,6 +22,8 @@ use crate::VERSION;
 pub struct Daemon {
     pub state: AppState,
     pub addr: SocketAddr,
+    /// Kept so hooks and adapter manifests can be found after bootstrap.
+    state_dir: StateDir,
 }
 
 impl Daemon {
@@ -52,6 +54,7 @@ impl Daemon {
         Ok(Self {
             addr: shared.socket_addr(),
             state: AppState::new(bus, store, sessions, token, shared, VERSION),
+            state_dir: state_dir.clone(),
         })
     }
 
@@ -72,10 +75,54 @@ impl Daemon {
     pub fn attend(&self) {
         crate::telegram::spawn(self.state.clone());
         crate::hub::spawn(self.state.clone());
+        self.watch_hooks();
 
         // Always started: it reads the token itself, so one saved later begins
         // polling without a restart, and a revoked one stops.
         tokio::spawn(crate::github::poll::watch(self.state.clone()));
+    }
+
+    /// Run event hooks, if any are configured.
+    ///
+    /// Subscribed to the bus rather than called from each publisher: a hook is
+    /// told what happened and cannot change it, which is what keeps this from
+    /// being a plugin interface.
+    fn watch_hooks(&self) {
+        let hooks = std::sync::Arc::new(crate::hooks::Hooks::load(&self.state_dir));
+        if hooks.is_empty() {
+            return;
+        }
+
+        let state = self.state.clone();
+        let mut events = state.bus.subscribe();
+
+        tokio::spawn(async move {
+            loop {
+                let record = match events.recv().await {
+                    Ok(record) => record,
+                    // Falling behind costs the events that were missed, not
+                    // every event afterwards. Stopping here would silently
+                    // disable hooks for the daemon's life after one burst —
+                    // exactly the storm the bounded queue exists for.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                        tracing::warn!(missed, "hooks fell behind; skipping what was missed");
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                };
+
+                // A hook runs in the task's worktree where there is one, so it
+                // can just run git without being told where.
+                let cwd = record
+                    .event
+                    .task_id()
+                    .and_then(|id| state.store.task(id).ok().flatten())
+                    .and_then(|task| task.worktree_path)
+                    .map(std::path::PathBuf::from);
+
+                hooks.fire(&record, cwd);
+            }
+        });
     }
 
     /// Watch live sessions until the daemon shuts down.

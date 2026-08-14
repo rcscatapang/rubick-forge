@@ -310,7 +310,7 @@ impl Bot {
 
         let queued = self.state.store.enqueue(&crate::store::NewQueuedTask {
             project_name: project.to_owned(),
-            adapter: AdapterId::ClaudeCode,
+            adapter: AdapterId::default(),
             title: title.clone(),
             prompt: Some(prompt),
             target: None,
@@ -360,7 +360,7 @@ impl Bot {
             project_id: chosen.id,
             title: title_from(&prompt),
             prompt,
-            adapter: AdapterId::ClaudeCode,
+            adapter: AdapterId::default(),
             // Typed by a person who will see whether it worked.
             idempotency_key: None,
         };

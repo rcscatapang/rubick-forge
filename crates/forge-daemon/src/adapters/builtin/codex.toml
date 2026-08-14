@@ -1,0 +1,53 @@
+# Codex, as a manifest. See claude-code.toml for what each section means.
+#
+# The markers are verbatim from the hand-written adapter this replaced, and are
+# checked against the captured panes in tests/fixtures/panes/.
+
+manifest_version = 1
+id = "codex"
+name = "Codex"
+binary = "codex"
+
+[[status]]
+status = "waiting"
+markers = [
+    "Do you trust",
+    "Press enter to continue",
+    "1. Yes",
+    "› 1.",
+    "Allow command",
+    "(y/n)",
+    "y to approve",
+]
+# The subset that means "answering yes or no makes sense here".
+permission_markers = ["Do you want to", "Allow", "approve", "(y/n)", "1. Yes"]
+
+[[status]]
+status = "error"
+# Codex's own failures only. Nothing here may match the compiler and test
+# output an agent routinely prints, or a healthy session would read as broken.
+markers = [
+    "stream error",
+    "We're currently experiencing high demand",
+    "Not signed in",
+    "run `codex login`",
+]
+
+[[status]]
+status = "working"
+markers = ["Esc to interrupt", "esc to interrupt", "Working ("]
+
+[[status]]
+status = "idle"
+markers = ["Use /skills", "send   Ctrl", "› "]
+
+[[settings]]
+key = "model"
+kind = "text"
+description = "Model to run, passed as --model."
+args = ["--model", "{value}"]
+
+[[settings]]
+key = "extra_args"
+kind = "args"
+description = "Extra command-line arguments, split on spaces."

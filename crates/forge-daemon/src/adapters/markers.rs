@@ -16,10 +16,13 @@ use forge_core::AgentStatus;
 pub const TAIL_LINES: usize = 30;
 
 /// The literal fragments that identify one state.
-#[derive(Debug, Clone, Copy)]
+///
+/// Owned rather than `&'static`: markers come from a TOML manifest read at
+/// start-up, not from this file.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarkerSet {
     pub status: AgentStatus,
-    pub markers: &'static [&'static str],
+    pub markers: Vec<String>,
 }
 
 impl MarkerSet {
@@ -34,9 +37,9 @@ impl MarkerSet {
 /// CLI usually keeps its spinner or status line on screen while it asks a
 /// question, and being wrong about `waiting` is the expensive mistake — that
 /// is the state a human has to be told about.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusPatterns {
-    pub sets: &'static [MarkerSet],
+    pub sets: Vec<MarkerSet>,
 }
 
 impl StatusPatterns {
@@ -74,47 +77,49 @@ pub fn tail_of(pane: &str, lines: usize) -> String {
 mod tests {
     use super::*;
 
-    const PATTERNS: StatusPatterns = StatusPatterns {
-        sets: &[
-            MarkerSet {
-                status: AgentStatus::Waiting,
-                markers: &["Do you want to", "(y/n)"],
-            },
-            MarkerSet {
-                status: AgentStatus::Working,
-                markers: &["Thinking…"],
-            },
-            MarkerSet {
-                status: AgentStatus::Idle,
-                markers: &["❯ "],
-            },
-        ],
-    };
+    fn patterns() -> StatusPatterns {
+        StatusPatterns {
+            sets: vec![
+                MarkerSet {
+                    status: AgentStatus::Waiting,
+                    markers: vec!["Do you want to".into(), "(y/n)".into()],
+                },
+                MarkerSet {
+                    status: AgentStatus::Working,
+                    markers: vec!["Thinking…".into()],
+                },
+                MarkerSet {
+                    status: AgentStatus::Idle,
+                    markers: vec!["❯ ".into()],
+                },
+            ],
+        }
+    }
 
     #[test]
     fn the_first_matching_set_wins() {
         // Both a question and a prompt on screen: the question is what matters.
         let pane = "❯ \nDo you want to proceed?";
 
-        assert_eq!(PATTERNS.classify(pane), Some(AgentStatus::Waiting));
+        assert_eq!(patterns().classify(pane), Some(AgentStatus::Waiting));
     }
 
     #[test]
     fn any_marker_in_a_set_is_enough() {
         assert_eq!(
-            PATTERNS.classify("Continue? (y/n)"),
+            patterns().classify("Continue? (y/n)"),
             Some(AgentStatus::Waiting)
         );
         assert_eq!(
-            PATTERNS.classify("Do you want to edit?"),
+            patterns().classify("Do you want to edit?"),
             Some(AgentStatus::Waiting)
         );
     }
 
     #[test]
     fn nothing_recognised_is_not_a_guess() {
-        assert_eq!(PATTERNS.classify("some unrelated output"), None);
-        assert_eq!(PATTERNS.classify(""), None);
+        assert_eq!(patterns().classify("some unrelated output"), None);
+        assert_eq!(patterns().classify(""), None);
     }
 
     #[test]
@@ -126,7 +131,7 @@ mod tests {
         }
 
         assert_eq!(
-            PATTERNS.classify(&pane),
+            patterns().classify(&pane),
             None,
             "a question scrolled away is not a question being asked"
         );
@@ -147,7 +152,7 @@ mod tests {
         pane.push_str(&"\n".repeat(25));
 
         assert_eq!(tail_of(&pane, 5), "Do you want to proceed?");
-        assert_eq!(PATTERNS.classify(&pane), Some(AgentStatus::Waiting));
+        assert_eq!(patterns().classify(&pane), Some(AgentStatus::Waiting));
     }
 
     #[test]

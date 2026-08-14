@@ -234,7 +234,7 @@ mod tests {
                 idempotency_key: None,
                 project_id: project.id,
                 title: "Add adapters".into(),
-                adapter: AdapterId::ClaudeCode,
+                adapter: AdapterId::default(),
                 base_branch: "main".into(),
                 initial_prompt: None,
             })

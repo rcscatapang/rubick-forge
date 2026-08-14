@@ -152,7 +152,7 @@ fn entry(name: &str, url: &str) -> MachineEntry {
 fn queued(project: &str, target: Option<&str>) -> NewQueuedTask {
     NewQueuedTask {
         project_name: project.to_owned(),
-        adapter: AdapterId::ClaudeCode,
+        adapter: AdapterId::default(),
         title: "Fix the flaky test".into(),
         prompt: Some("it fails one run in ten".into()),
         target: target.map(str::to_owned),
@@ -373,7 +373,7 @@ async fn a_created_task_carries_the_queued_title_and_prompt() {
             project_id: 7,
             title: "Fix the flaky test".into(),
             prompt: "it fails one run in ten".into(),
-            adapter: AdapterId::Codex,
+            adapter: "codex".parse::<AdapterId>().unwrap(),
             idempotency_key: Some("forge-queue-3".into()),
         })
         .await
@@ -491,7 +491,7 @@ async fn a_retry_under_the_same_key_gets_the_first_task_rather_than_a_second() {
         project_id: 7,
         title: "Fix the flaky test".into(),
         prompt: "it fails one run in ten".into(),
-        adapter: AdapterId::ClaudeCode,
+        adapter: AdapterId::default(),
         idempotency_key: Some("forge-queue-3".into()),
     };
 

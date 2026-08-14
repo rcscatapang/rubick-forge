@@ -14,8 +14,8 @@ use crate::{AdapterId, AgentStatus, Timestamp};
 pub struct AdapterSettings(BTreeMap<AdapterId, Map<String, Value>>);
 
 impl AdapterSettings {
-    pub fn get(&self, adapter: AdapterId) -> Option<&Map<String, Value>> {
-        self.0.get(&adapter)
+    pub fn get(&self, adapter: &AdapterId) -> Option<&Map<String, Value>> {
+        self.0.get(adapter)
     }
 
     pub fn set(&mut self, adapter: AdapterId, settings: Map<String, Value>) {
@@ -113,7 +113,7 @@ mod tests {
             id: 2,
             project_id: 1,
             title: "Add adapters".into(),
-            adapter: AdapterId::ClaudeCode,
+            adapter: AdapterId::default(),
             base_branch: "main".into(),
             branch: "forge/add-adapters".into(),
             worktree_path: Some("/repos/.forge-worktrees/forge/add-adapters".into()),
@@ -129,14 +129,14 @@ mod tests {
         let mut settings = AdapterSettings::default();
         let mut claude = Map::new();
         claude.insert("model".into(), Value::String("opus".into()));
-        settings.set(AdapterId::ClaudeCode, claude);
+        settings.set(AdapterId::default(), claude);
 
         let json = serde_json::to_string(&settings).unwrap();
         assert_eq!(json, r#"{"claude-code":{"model":"opus"}}"#);
 
         let parsed: AdapterSettings = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.get(AdapterId::ClaudeCode).unwrap()["model"], "opus");
-        assert!(parsed.get(AdapterId::Codex).is_none());
+        assert_eq!(parsed.get(&AdapterId::default()).unwrap()["model"], "opus");
+        assert!(parsed.get(&"codex".parse::<AdapterId>().unwrap()).is_none());
     }
 
     #[test]

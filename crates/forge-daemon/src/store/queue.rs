@@ -36,7 +36,7 @@ fn read(row: &Row<'_>) -> rusqlite::Result<QueuedTask> {
         // A row naming an adapter this daemon does not know reads as the
         // default rather than failing the whole queue read. Only a hand-edited
         // database or a downgrade can produce one.
-        adapter: adapter.parse().unwrap_or(AdapterId::ClaudeCode),
+        adapter: adapter.parse().unwrap_or(AdapterId::default()),
         title: row.get("title")?,
         prompt: row.get("prompt")?,
         target: row.get("target")?,
@@ -206,7 +206,7 @@ mod tests {
     fn queued(target: Option<&str>) -> NewQueuedTask {
         NewQueuedTask {
             project_name: "forge".into(),
-            adapter: AdapterId::ClaudeCode,
+            adapter: AdapterId::default(),
             title: "Fix the flaky test".into(),
             prompt: Some("it fails one run in ten".into()),
             target: target.map(str::to_owned),
@@ -220,7 +220,7 @@ mod tests {
         let row = store.enqueue(&queued(None)).unwrap();
 
         assert_eq!(row.project_name, "forge");
-        assert_eq!(row.adapter, AdapterId::ClaudeCode);
+        assert_eq!(row.adapter, AdapterId::default());
         assert_eq!(row.prompt.as_deref(), Some("it fails one run in ten"));
         assert_eq!(row.state, QueueState::Queued);
         assert_eq!(row.target, None);

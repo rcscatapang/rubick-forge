@@ -311,11 +311,16 @@ impl Machine for LocalMachine {
                 .map_err(refused)?
                 .ok_or_else(|| FleetError::Refused(format!("there is no task {task_id}")))?;
 
-            let keys = crate::adapters::adapter(task.adapter).answer_keys(approve);
+            let adapter = crate::adapters::adapter(&task.adapter).ok_or_else(|| {
+                FleetError::Refused(format!("no adapter called `{}` is loaded", task.adapter))
+            })?;
+
+            let keys = adapter.answer_keys(approve);
+            let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
 
             self.state
                 .sessions
-                .send_answer(task_id, keys)
+                .send_answer(task_id, &keys)
                 .await
                 .map_err(refused)
         })

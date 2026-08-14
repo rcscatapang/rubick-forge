@@ -7,7 +7,7 @@ import { toast } from "sonner";
 import { CommitDialog } from "@/components/commit-dialog";
 import { GitHubChip } from "@/components/github-chip";
 import { StatusBadge } from "@/components/status-badge";
-import { ADAPTER_LABELS, isLive, type Task, type TaskGitHub } from "@/lib/api-types";
+import { isLive, type Task, type TaskGitHub } from "@/lib/api-types";
 import { useMachineId } from "@/lib/connection";
 import { describe } from "@/lib/errors";
 import { isLocal, type Machine } from "@/lib/machines";
@@ -52,7 +52,7 @@ export function TaskRow({
         <div className="min-w-0">
           <p className="truncate text-sm font-medium">{task.title}</p>
           <p className="truncate text-xs text-muted-foreground">
-            {ADAPTER_LABELS[task.adapter]} · {task.branch}
+            {task.adapter} · {task.branch}
             {git.data?.dirty && " · uncommitted changes"}
             {git.data?.ahead ? ` · ${git.data.ahead} to push` : ""}
           </p>

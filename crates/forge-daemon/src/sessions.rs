@@ -116,15 +116,31 @@ impl<R: SessionRuntime> SessionManager<R> {
             .live_session(task_id)?
             .ok_or(SessionManagerError::NotRunning(task_id))?;
 
-        // Through a paste buffer, then a separate Enter: the text may contain
-        // newlines and anything else, and none of it may be read as keys.
-        self.runtime
-            .paste(&session.tmux_name, text)
-            .await
-            .map_err(|err| SessionManagerError::Runtime(err.to_string()))?;
+        // How the text arrives is the adapter's business: a manifest declares
+        // whether its CLI wants a paste buffer or keystrokes, and what submits.
+        let injection = self.adapter_for(task_id)?.injection().clone();
 
+        if injection.paste {
+            // Through a paste buffer: the text may contain newlines and
+            // anything else, and none of it may be read as key bindings.
+            self.runtime
+                .paste(&session.tmux_name, text)
+                .await
+                .map_err(|err| SessionManagerError::Runtime(err.to_string()))?;
+        } else {
+            self.runtime
+                .send_keys(&session.tmux_name, &[text])
+                .await
+                .map_err(|err| SessionManagerError::Runtime(err.to_string()))?;
+        }
+
+        if injection.submit_keys.is_empty() {
+            return Ok(());
+        }
+
+        let keys: Vec<&str> = injection.submit_keys.iter().map(String::as_str).collect();
         self.runtime
-            .send_keys(&session.tmux_name, &["Enter"])
+            .send_keys(&session.tmux_name, &keys)
             .await
             .map_err(|err| SessionManagerError::Runtime(err.to_string()))
     }
@@ -383,7 +399,8 @@ impl<R: SessionRuntime> SessionManager<R> {
         session: &Session,
         pane: &crate::runtime::PaneState,
     ) -> Result<Outcome, SessionManagerError> {
-        let patterns = self.patterns_for(session.task_id)?;
+        let adapter = self.adapter_for(session.task_id)?;
+        let patterns = adapter.status_patterns();
 
         // Capturing is the expensive part of a poll, so it is skipped when the
         // pane is dead — whose verdict does not depend on the screen — and
@@ -532,16 +549,25 @@ impl<R: SessionRuntime> SessionManager<R> {
     }
 
     /// The markers for whichever adapter a task runs.
-    fn patterns_for(
+    /// The adapter whose markers read this task's screen.
+    ///
+    /// Held as an `Arc` rather than borrowed: manifests can be reloaded, and a
+    /// poller holding a reference into the registry would pin the old one.
+    fn adapter_for(
         &self,
         task_id: i64,
-    ) -> Result<&'static crate::adapters::markers::StatusPatterns, SessionManagerError> {
+    ) -> Result<std::sync::Arc<crate::adapters::Adapter>, SessionManagerError> {
         let task = self
             .store
             .task(task_id)?
             .ok_or_else(|| StoreError::Corrupt(format!("task {task_id} is gone")))?;
 
-        Ok(adapters::adapter(task.adapter).status_patterns())
+        adapters::adapter(&task.adapter).ok_or_else(|| {
+            SessionManagerError::Runtime(format!(
+                "no adapter called `{}` is loaded, so this session cannot be read",
+                task.adapter
+            ))
+        })
     }
 
     fn trackers(&self) -> std::sync::MutexGuard<'_, HashMap<i64, Tracker>> {

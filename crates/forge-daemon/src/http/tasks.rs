@@ -79,15 +79,15 @@ pub struct SessionList {
 
 /// The argv for a task's agent, built from its adapter and the project's
 /// settings for that adapter.
-fn launch_command(task: &Task, project: &Project) -> Vec<String> {
-    let adapter = crate::adapters::adapter(task.adapter);
+fn launch_command(task: &Task, project: &Project) -> ApiResult<Vec<String>> {
+    let adapter = require_adapter(task)?;
     let settings = project
         .adapter_settings
-        .get(task.adapter)
+        .get(&task.adapter)
         .cloned()
         .unwrap_or_default();
 
-    adapter.launch_command(task, &settings)
+    Ok(adapter.launch_command(task, &settings))
 }
 
 /// Long enough for a paragraph of direction, short enough that a client
@@ -139,9 +139,10 @@ pub async fn answer(
     Json(request): Json<AnswerRequest>,
 ) -> ApiResult<StatusCode> {
     let task = load(&state, id)?;
-    let keys = crate::adapters::adapter(task.adapter).answer_keys(request.approve);
+    let keys = require_adapter(&task)?.answer_keys(request.approve);
+    let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
 
-    state.sessions.send_answer(id, keys).await?;
+    state.sessions.send_answer(id, &keys).await?;
 
     Ok(StatusCode::ACCEPTED)
 }
@@ -208,7 +209,7 @@ pub async fn start(
 
     let session = state
         .sessions
-        .start(&task, &project, &launch_command(&task, &project))
+        .start(&task, &project, &launch_command(&task, &project)?)
         .await?;
 
     Ok((StatusCode::CREATED, Json(session)))
@@ -216,15 +217,39 @@ pub async fn start(
 
 /// Refuse to start when the agent's CLI is not there, and say which one.
 async fn require_agent(task: &Task) -> ApiResult<()> {
-    let check = crate::adapters::adapter(task.adapter).binary_check().await;
-    match unusable_agent(task.adapter, &check) {
+    let adapter = require_adapter(task)?;
+    let check = adapter.binary_check().await;
+
+    match unusable_agent(&adapter, &check) {
         Some(err) => Err(err),
         None => Ok(()),
     }
 }
 
+/// The adapter a task names, or an error saying it is gone.
+///
+/// A manifest can be deleted while a task that used it still exists. Saying so
+/// is better than falling back to another agent, which would run something the
+/// task never asked for.
+pub fn require_adapter(task: &Task) -> ApiResult<std::sync::Arc<crate::adapters::Adapter>> {
+    crate::adapters::adapter(&task.adapter).ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "adapter_unavailable",
+            format!(
+                "no adapter called `{}` is loaded. Its manifest may have been \
+                 removed or failed to load; see /adapters.",
+                task.adapter
+            ),
+        )
+    })
+}
+
 /// The error for an agent CLI that cannot be used, or `None` when it can.
-fn unusable_agent(adapter: AdapterId, check: &forge_core::BinaryStatus) -> Option<ApiError> {
+fn unusable_agent(
+    adapter: &crate::adapters::Adapter,
+    check: &forge_core::BinaryStatus,
+) -> Option<ApiError> {
     if check.ok {
         return None;
     }
@@ -260,7 +285,7 @@ pub async fn restart(
 
     let session = state
         .sessions
-        .restart(&task, &project, &launch_command(&task, &project))
+        .restart(&task, &project, &launch_command(&task, &project)?)
         .await?;
 
     Ok((StatusCode::CREATED, Json(session)))
@@ -310,6 +335,15 @@ pub async fn create(
 ) -> ApiResult<(StatusCode, Json<Task>)> {
     if request.title.trim().is_empty() {
         return Err(ApiError::bad_request("a task needs a title"));
+    }
+
+    // Refused here rather than at start: a task nobody can run is not a task,
+    // and finding out later means a row to clean up.
+    if crate::adapters::adapter(&request.adapter).is_none() {
+        return Err(ApiError::bad_request(format!(
+            "no adapter called `{}` is loaded; see /adapters",
+            request.adapter
+        )));
     }
 
     // Answered before anything is created, so a retry whose first answer was
@@ -651,6 +685,10 @@ impl From<TaskError> for ApiError {
 mod tests {
     use super::*;
 
+    fn claude() -> std::sync::Arc<crate::adapters::Adapter> {
+        crate::adapters::adapter(&AdapterId::default()).expect("a built-in")
+    }
+
     #[test]
     fn a_usable_agent_is_no_obstacle() {
         let check = forge_core::BinaryStatus {
@@ -661,14 +699,14 @@ mod tests {
             detail: None,
         };
 
-        assert!(unusable_agent(AdapterId::ClaudeCode, &check).is_none());
+        assert!(unusable_agent(&claude(), &check).is_none());
     }
 
     #[test]
     fn a_missing_agent_is_a_503_that_names_the_cli() {
         let check = forge_core::BinaryStatus::missing("claude");
 
-        let err = unusable_agent(AdapterId::ClaudeCode, &check).unwrap();
+        let err = unusable_agent(&claude(), &check).unwrap();
 
         assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(err.message().contains("claude"), "{}", err.message());

@@ -1,3 +1,7 @@
+> **The two built-in adapters are now TOML manifests.** How an adapter is
+> declared, validated and loaded is described in [plugins.md](plugins.md);
+> this page covers what the markers mean and how to capture fixtures.
+
 # Agent adapters
 
 An adapter is everything the daemon knows about one agent CLI: how to launch

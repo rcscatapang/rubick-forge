@@ -40,6 +40,12 @@ pub struct Health {
     /// This daemon's machine name, so a multi-daemon UI can label it.
     pub machine: String,
     pub binaries: Vec<BinaryStatus>,
+    /// Adapter manifests that would not load, each naming its file and why.
+    ///
+    /// A broken manifest costs its own adapter and nothing else, so it is a
+    /// warning here rather than a daemon that will not start.
+    #[serde(default)]
+    pub adapter_errors: Vec<AdapterLoadError>,
 }
 
 impl Health {
@@ -63,6 +69,7 @@ mod tests {
     #[test]
     fn health_is_only_green_when_every_binary_is() {
         let mut health = Health {
+            adapter_errors: Vec::new(),
             version: "0.1.0".into(),
             uptime_secs: 12,
             machine: "mac-mini".into(),
@@ -72,4 +79,12 @@ mod tests {
         health.binaries.push(BinaryStatus::missing("tmux"));
         assert!(!health.is_healthy());
     }
+}
+
+/// One adapter manifest that could not be used.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterLoadError {
+    /// The file it came from, or `built-in`.
+    pub source: String,
+    pub detail: String,
 }

@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  ADAPTER_IDS,
-  ADAPTER_LABELS,
+  DEFAULT_ADAPTER,
   AGENT_STATUSES,
   AGENT_STATUS_LABELS,
   type EventRecord,
@@ -18,9 +17,9 @@ describe("api-types", () => {
     for (const status of AGENT_STATUSES) {
       expect(AGENT_STATUS_LABELS[status]).toBeTruthy();
     }
-    for (const adapter of ADAPTER_IDS) {
-      expect(ADAPTER_LABELS[adapter]).toBeTruthy();
-    }
+    // Adapters are manifests on the daemon now, so the app hard-codes only
+    // the one it falls back to before `GET /adapters` has answered.
+    expect(DEFAULT_ADAPTER).toBe("claude-code");
   });
 
   it("flags waiting and error as needing a human", () => {
@@ -62,6 +61,7 @@ describe("api-types", () => {
       uptime_secs: 12,
       machine: "mac-mini",
       binaries: [{ name: "git", path: "/usr/bin/git", version: "2.50.1", ok: true, detail: null }],
+      adapter_errors: [],
     };
 
     expect(isHealthy(health)).toBe(true);

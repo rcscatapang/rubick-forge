@@ -1,0 +1,332 @@
+//! Event hooks against real scripts.
+//!
+//! Hooks run other people's executables, so the things worth proving are the
+//! limits: what they are told, where they run, and that they cannot outlast
+//! their timeout or pile up without bound.
+
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use forge_core::{EventKind, EventRecord, ForgeEvent, Timestamp};
+use forge_daemon::hooks::{self, Hooks, HooksConfig};
+
+/// Write an executable shell script into `dir`.
+fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// A timeout for hooks that finish immediately, where the timeout is not what
+/// the test is about. Long enough that a loaded machine cannot reach it.
+const PLENTY: Duration = Duration::from_secs(30);
+
+/// The lines a hook script has appended so far.
+fn lines(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Wait for something to have happened rather than sleeping a fixed amount.
+/// These tests spawn real processes, and a busy machine is slower than any
+/// margin worth hard-coding.
+async fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !done() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+fn finished(task_id: i64) -> EventRecord {
+    EventRecord {
+        id: 1,
+        ts: Timestamp::now(),
+        event: ForgeEvent::TaskFinished {
+            task_id,
+            session_id: 3,
+        },
+    }
+}
+
+#[tokio::test]
+async fn a_hook_is_handed_the_event_on_stdin() {
+    let temp = tempfile::tempdir().unwrap();
+    let hook = script(temp.path(), "echo.sh", "cat");
+
+    let payload = serde_json::to_string(&finished(12)).unwrap();
+    let outcome = hooks::run(&hook, &payload, None, PLENTY, &[])
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.code, Some(0));
+    // The whole event, so a hook can act on any of it.
+    assert!(outcome.output.contains("task_finished"), "{outcome:?}");
+    assert!(outcome.output.contains("\"task_id\":12"), "{outcome:?}");
+}
+
+#[tokio::test]
+async fn a_hook_runs_in_the_worktree_when_the_event_has_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let worktree = temp.path().join("tree");
+    std::fs::create_dir(&worktree).unwrap();
+    let hook = script(temp.path(), "where.sh", "pwd");
+
+    let outcome = hooks::run(&hook, "{}", Some(&worktree), PLENTY, &[])
+        .await
+        .unwrap();
+
+    // macOS puts a symlink in front of the temp directory.
+    let reported = std::fs::canonicalize(outcome.output.trim()).unwrap();
+    assert_eq!(reported, std::fs::canonicalize(&worktree).unwrap());
+}
+
+#[tokio::test]
+async fn a_hook_whose_worktree_is_gone_still_runs() {
+    let temp = tempfile::tempdir().unwrap();
+    let hook = script(temp.path(), "ok.sh", "echo fine");
+
+    let outcome = hooks::run(
+        &hook,
+        "{}",
+        Some(&temp.path().join("cleaned-up")),
+        PLENTY,
+        &[],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.output, "fine");
+}
+
+#[tokio::test]
+async fn a_hanging_hook_is_killed_at_the_timeout() {
+    let temp = tempfile::tempdir().unwrap();
+    let hook = script(temp.path(), "hang.sh", "sleep 30");
+
+    let started = Instant::now();
+    let error = hooks::run(&hook, "{}", None, Duration::from_millis(200), &[])
+        .await
+        .unwrap_err();
+
+    assert!(error.contains("killed"), "{error}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "it was not waited on"
+    );
+}
+
+#[tokio::test]
+async fn a_hook_that_reads_nothing_does_not_hang_the_daemon() {
+    // stdin is closed after the payload, so a script that never reads it — or
+    // one that reads to end-of-input — finishes either way.
+    let temp = tempfile::tempdir().unwrap();
+    let hook = script(temp.path(), "ignore.sh", "echo done");
+
+    let outcome = hooks::run(&hook, &"x".repeat(100_000), None, PLENTY, &[])
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.output, "done");
+}
+
+#[tokio::test]
+async fn a_failing_hook_is_recorded_rather_than_acted_on() {
+    // Fire and forget: the exit code is reported and changes nothing.
+    let temp = tempfile::tempdir().unwrap();
+    let hook = script(temp.path(), "fail.sh", "echo went wrong >&2; exit 3");
+
+    let outcome = hooks::run(&hook, "{}", None, PLENTY, &[]).await.unwrap();
+
+    assert_eq!(outcome.code, Some(3));
+    assert!(outcome.output.contains("went wrong"));
+}
+
+#[tokio::test]
+async fn a_hook_that_is_not_there_is_an_error_not_a_panic() {
+    let temp = tempfile::tempdir().unwrap();
+
+    let error = hooks::run(&temp.path().join("missing.sh"), "{}", None, PLENTY, &[])
+        .await
+        .unwrap_err();
+
+    assert!(error.contains("cannot run it"), "{error}");
+}
+
+#[tokio::test]
+async fn only_the_configured_event_runs_a_hook() {
+    let temp = tempfile::tempdir().unwrap();
+    let marker = temp.path().join("ran");
+    script(
+        temp.path(),
+        "touch.sh",
+        &format!("touch {}", marker.display()),
+    );
+
+    let config: HooksConfig = toml::from_str(
+        r#"
+[on]
+task_finished = "touch.sh"
+"#,
+    )
+    .unwrap();
+    let hooks = Arc::new(Hooks::new(config, temp.path().to_path_buf()));
+
+    // An event nothing is configured for.
+    hooks.fire(
+        &EventRecord {
+            id: 2,
+            ts: Timestamp::now(),
+            event: ForgeEvent::TaskDeleted { task_id: 1 },
+        },
+        None,
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!marker.exists(), "an unconfigured event ran something");
+
+    hooks.fire(&finished(1), None);
+    for _ in 0..200 {
+        if marker.exists() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("the configured event did not run its hook");
+}
+
+#[tokio::test]
+async fn a_storm_of_events_drops_rather_than_piling_up() {
+    // A fleet of agents finishing at once must cost log lines, not a fork bomb.
+    let temp = tempfile::tempdir().unwrap();
+    let counter = temp.path().join("count");
+
+    // Each run appends a line, so the file counts how many were let through.
+    script(
+        temp.path(),
+        "slow.sh",
+        &format!("echo x >> {}; sleep 0.4", counter.display()),
+    );
+
+    let config: HooksConfig = toml::from_str(
+        r#"
+concurrency = 1
+queue = 1
+
+[on]
+task_finished = "slow.sh"
+"#,
+    )
+    .unwrap();
+    let hooks = Arc::new(Hooks::new(config, temp.path().to_path_buf()));
+
+    for _ in 0..50 {
+        hooks.fire(&finished(1), None);
+    }
+
+    // One running plus one queued. The other 48 were refused outright rather
+    // than held, which is the whole point of a bounded queue. Wait for the
+    // first to start, then leave a window in which anything wrongly held would
+    // have run and appended its own line.
+    wait_for("the first hook to start", || !lines(&counter).is_empty()).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let ran = lines(&counter).len();
+    assert!(ran <= 2, "{ran} of 50 ran; the queue is not bounded");
+}
+
+#[tokio::test]
+async fn a_hook_pointing_outside_its_directory_is_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let marker = temp.path().join("escaped");
+
+    let config = HooksConfig {
+        on: [(
+            EventKind::TaskFinished.as_str().to_owned(),
+            format!("../{}", marker.display()),
+        )]
+        .into_iter()
+        .collect(),
+        ..HooksConfig::default()
+    };
+    let hooks = Arc::new(Hooks::new(config, temp.path().to_path_buf()));
+
+    hooks.fire(&finished(1), None);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert!(!marker.exists(), "a path escaped the hooks directory");
+}
+
+#[tokio::test]
+async fn no_more_than_the_concurrency_cap_run_at_once() {
+    // The cap is separate from the queue bound: five may be admitted while
+    // only one runs, and the other four wait rather than being dropped.
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("log");
+    script(
+        temp.path(),
+        "trace.sh",
+        &format!(
+            "echo start >> {0}; sleep 0.3; echo end >> {0}",
+            log.display()
+        ),
+    );
+
+    let config: HooksConfig = toml::from_str(
+        r#"
+concurrency = 1
+queue = 5
+
+[on]
+task_finished = "trace.sh"
+"#,
+    )
+    .unwrap();
+    let hooks = Arc::new(Hooks::new(config, temp.path().to_path_buf()));
+
+    for _ in 0..4 {
+        hooks.fire(&finished(1), None);
+    }
+    // Four hooks one at a time: a start and an end each, and none dropped.
+    wait_for("the four queued hooks to run", || lines(&log).len() >= 8).await;
+
+    let lines = lines(&log);
+
+    // Every start is followed by its own end. Two in a row would mean two ran
+    // at the same time.
+    for pair in lines.chunks(2) {
+        assert_eq!(pair, ["start", "end"], "hooks overlapped: {lines:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_hook_is_told_what_happened_in_its_environment_too() {
+    // The same facts as the JSON on stdin, for a script too short to parse it.
+    let temp = tempfile::tempdir().unwrap();
+    let hook = script(
+        temp.path(),
+        "env.sh",
+        "echo \"$FORGE_EVENT_KIND $FORGE_EVENT_ID $FORGE_TASK_ID\"",
+    );
+
+    let outcome = hooks::run(
+        &hook,
+        "{}",
+        None,
+        PLENTY,
+        &[
+            ("FORGE_EVENT_KIND", "task_finished".to_owned()),
+            ("FORGE_EVENT_ID", "41".to_owned()),
+            ("FORGE_TASK_ID", "12".to_owned()),
+        ],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.output, "task_finished 41 12");
+}

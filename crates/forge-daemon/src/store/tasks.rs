@@ -110,7 +110,7 @@ impl Store {
                 id,
                 project_id: new.project_id,
                 title: new.title.clone(),
-                adapter: new.adapter,
+                adapter: new.adapter.clone(),
                 base_branch: new.base_branch.clone(),
                 branch: new.base_branch.clone(),
                 worktree_path: None,
@@ -338,7 +338,7 @@ mod tests {
             idempotency_key: None,
             project_id,
             title: "Add adapters".into(),
-            adapter: AdapterId::ClaudeCode,
+            adapter: AdapterId::default(),
             base_branch: "main".into(),
             initial_prompt: Some("go".into()),
         }

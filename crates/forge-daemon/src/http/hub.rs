@@ -100,7 +100,7 @@ pub async fn enqueue(
 
     let row = state.store.enqueue(&NewQueuedTask {
         project_name: project_name.to_owned(),
-        adapter: request.adapter.unwrap_or(AdapterId::ClaudeCode),
+        adapter: request.adapter.unwrap_or(AdapterId::default()),
         title: title.to_owned(),
         prompt: request
             .prompt

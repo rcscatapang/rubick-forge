@@ -81,6 +81,7 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/adapters", get(adapters::list))
+        .route("/adapters/reload", axum::routing::post(adapters::reload))
         .route("/settings", get(settings::list).patch(settings::patch))
         .route("/events", get(events::list))
         .route("/ws/events", get(events::stream))

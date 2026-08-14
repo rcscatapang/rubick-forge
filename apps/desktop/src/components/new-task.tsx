@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { toast } from "sonner";
 
-import { ADAPTER_LABELS, type AdapterId, type Project } from "@/lib/api-types";
+import { type AdapterId, type Project } from "@/lib/api-types";
 import { describe } from "@/lib/errors";
 import { useAdapters, useTaskActions } from "@/lib/queries";
 
@@ -42,7 +42,7 @@ export function NewTaskForm({
         : title.trim() === ""
           ? "Give the task a title."
           : chosen && !chosen.binary.ok
-            ? (chosen.binary.detail ?? `${ADAPTER_LABELS[adapter]} is not installed.`)
+            ? (chosen.binary.detail ?? `${chosen.name} is not installed.`)
             : null;
 
   const submit = async (event: React.FormEvent) => {

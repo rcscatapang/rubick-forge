@@ -155,7 +155,7 @@ mod tests {
         QueuedTask {
             id: 1,
             project_name: project.to_owned(),
-            adapter: AdapterId::ClaudeCode,
+            adapter: AdapterId::default(),
             title: "Fix the flaky test".into(),
             prompt: None,
             target: target.map(str::to_owned),
