@@ -1,5 +1,8 @@
+import { useQueries } from "@tanstack/react-query";
+
 import type { EventRecord } from "@/lib/api-types";
-import { useActivity } from "@/lib/queries";
+import { useMachines } from "@/lib/machine-registry";
+import { machineEventsQuery } from "@/lib/queries";
 
 /** What each event kind reads as in the feed. */
 function describe(event: EventRecord): string {
@@ -31,24 +34,57 @@ function describe(event: EventRecord): string {
   }
 }
 
+/** How many entries the merged feed shows, however many machines fed it. */
+const FEED_LENGTH = 50;
+
+/** One machine's event, kept together with where it came from. */
+interface Entry {
+  machine: string;
+  /** Only shown when there is more than one machine to tell apart. */
+  badge: string | null;
+  event: EventRecord;
+}
+
+/**
+ * What happened, across every machine, newest first.
+ *
+ * This is the one view that genuinely has to merge: everything else on the
+ * dashboard belongs to one machine and is rendered under it. Ordering is by
+ * the daemons' own timestamps, which are UTC — two Macs whose clocks disagree
+ * will interleave by however much they disagree, and no ordering the app
+ * invents would be more honest than that.
+ */
 export function ActivityFeed() {
-  const activity = useActivity();
-  // Newest first, though the daemon pages oldest-first.
-  const events = [...(activity.data?.events ?? [])].reverse();
+  const { machines } = useMachines();
+  const named = machines.length > 1;
+
+  const feeds = useQueries({ queries: machines.map(machineEventsQuery) });
+
+  const entries: Entry[] = feeds.flatMap((feed, index) => {
+    const { machine } = machines[index];
+    return (feed.data?.events ?? []).map((event) => ({
+      machine: machine.id,
+      badge: named ? machine.name : null,
+      event,
+    }));
+  });
+
+  entries.sort((a, b) => b.event.ts.localeCompare(a.event.ts) || b.event.id - a.event.id);
 
   return (
     <section className="flex flex-col gap-2">
       <h2 className="text-sm font-semibold">Activity</h2>
 
-      {events.length === 0 ? (
+      {entries.length === 0 ? (
         <p className="text-xs text-muted-foreground">Nothing has happened yet.</p>
       ) : (
         <ol className="flex flex-col gap-1 text-xs">
-          {events.map((event) => (
-            <li key={event.id} className="flex gap-2 text-muted-foreground">
+          {entries.slice(0, FEED_LENGTH).map(({ machine, badge, event }) => (
+            <li key={`${machine}:${event.id}`} className="flex gap-2 text-muted-foreground">
               <time dateTime={event.ts} className="tabular-nums">
                 {new Date(event.ts).toLocaleTimeString()}
               </time>
+              {badge && <span className="shrink-0 rounded bg-muted px-1">{badge}</span>}
               <span className="text-foreground">{describe(event)}</span>
             </li>
           ))}

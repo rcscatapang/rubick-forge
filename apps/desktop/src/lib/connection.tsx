@@ -7,55 +7,65 @@ import {
   type ReactNode,
 } from "react";
 
-import { DEFAULT_DAEMON_URL, type DaemonConnection } from "@/lib/daemon";
+import {
+  rememberConnection,
+  storedConnection,
+  type DaemonConnection,
+} from "@/lib/daemon";
+import { LOCAL_MACHINE_ID } from "@/lib/machines";
 
 interface Connected {
+  /** Which machine's daemon this subtree is talking to. */
+  machineId: string;
   connection: DaemonConnection;
   /** Adopt a new daemon or token, taking effect immediately. */
   connect: (connection: DaemonConnection) => void;
 }
 
 /**
- * Where this window's daemon is.
+ * Which daemon this part of the tree is a view of.
  *
- * The app holds no state of its own beyond this: everything else it shows is
- * read from the daemon.
+ * Scoped rather than global: with several machines, the dashboard renders one
+ * subtree per machine and each reads its own daemon from here. Everything a
+ * component shows still comes from a daemon — the app holds no state of its
+ * own beyond where they are.
  */
 const DaemonContext = createContext<Connected | null>(null);
 
-const TOKEN_KEY = "forge.daemon.token";
-const URL_KEY = "forge.daemon.url";
-
-/** What the browser has been told about the daemon, if anything. */
-export function storedConnection(): DaemonConnection {
-  return {
-    url: localStorage.getItem(URL_KEY) ?? DEFAULT_DAEMON_URL,
-    token: localStorage.getItem(TOKEN_KEY) ?? "",
-  };
-}
-
-function remember(connection: DaemonConnection) {
-  localStorage.setItem(URL_KEY, connection.url);
-  localStorage.setItem(TOKEN_KEY, connection.token);
-}
+export { storedConnection };
 
 export function DaemonProvider({
+  machineId = LOCAL_MACHINE_ID,
   connection,
   children,
 }: {
+  machineId?: string;
+  /** Supplied by the machines list. Omitted, the provider owns the local one. */
   connection?: DaemonConnection;
   children: ReactNode;
 }) {
-  const [current, setCurrent] = useState(() => connection ?? storedConnection());
+  const [own, setOwn] = useState(storedConnection);
+  const given = connection !== undefined;
+  const local = machineId === LOCAL_MACHINE_ID;
 
   // State, not just storage: a token written to disk that the running app does
   // not pick up leaves it authenticating with the old one until it restarts.
-  const connect = useCallback((next: DaemonConnection) => {
-    remember(next);
-    setCurrent(next);
-  }, []);
+  // A provider that was handed a connection is showing the machines list's
+  // idea of that machine, so it writes the token down and lets the list
+  // notice; keeping state of its own here would be a write nothing reads.
+  const connect = useCallback(
+    (next: DaemonConnection) => {
+      if (local) rememberConnection(next);
+      if (!given) setOwn(next);
+    },
+    [local, given],
+  );
 
-  const value = useMemo(() => ({ connection: current, connect }), [current, connect]);
+  const current = connection ?? own;
+  const value = useMemo(
+    () => ({ machineId, connection: current, connect }),
+    [machineId, current, connect],
+  );
 
   return <DaemonContext.Provider value={value}>{children}</DaemonContext.Provider>;
 }
@@ -70,6 +80,11 @@ function connected(): Connected {
 
 export function useDaemon(): DaemonConnection {
   return connected().connection;
+}
+
+/** Which machine the surrounding subtree belongs to. */
+export function useMachineId(): string {
+  return connected().machineId;
 }
 
 export function useConnect(): (connection: DaemonConnection) => void {

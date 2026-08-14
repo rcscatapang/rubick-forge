@@ -4,22 +4,30 @@ import type { ReactElement } from "react";
 import { MemoryRouter } from "react-router";
 
 import { DaemonProvider } from "@/lib/connection";
+import { MachineRegistry } from "@/lib/machine-registry";
 
 /**
  * Render a component the way the app does, against a daemon that is whatever
  * the test says it is.
  */
 export function renderApp(ui: ReactElement) {
+  // As if this Mac had connected before: the machines list resolves the local
+  // token synchronously, so a test can assert without awaiting a keychain read.
+  localStorage.setItem("forge.daemon.url", "http://daemon.test");
+  localStorage.setItem("forge.daemon.token", "test-token");
+
   const queries = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
 
   return render(
-    <DaemonProvider connection={{ url: "http://daemon.test", token: "test-token" }}>
-      <QueryClientProvider client={queries}>
-        <MemoryRouter>{ui}</MemoryRouter>
-      </QueryClientProvider>
-    </DaemonProvider>,
+    <MachineRegistry>
+      <DaemonProvider connection={{ url: "http://daemon.test", token: "test-token" }}>
+        <QueryClientProvider client={queries}>
+          <MemoryRouter>{ui}</MemoryRouter>
+        </QueryClientProvider>
+      </DaemonProvider>
+    </MachineRegistry>,
   );
 }
 

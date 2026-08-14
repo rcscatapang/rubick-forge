@@ -8,12 +8,23 @@ import {
 } from "react";
 
 import { useEvents } from "@/hooks/use-events";
-import { useNotifications, type PermissionState } from "@/hooks/use-notifications";
+import {
+  useAskNotificationPermission,
+  useNotifications,
+  type PermissionState,
+} from "@/hooks/use-notifications";
+import { DaemonProvider } from "@/lib/connection";
+import { useMachines } from "@/lib/machine-registry";
+
+/** Which task's terminal is on screen, and on which machine. */
+export interface Watched {
+  machineId: string;
+  taskId: number;
+}
 
 interface Watching {
-  /** The task whose terminal is on screen, if any. */
-  taskId: number | null;
-  watch: (taskId: number | null) => void;
+  watched: Watched | null;
+  watch: (watched: Watched | null) => void;
 }
 
 const WatchingContext = createContext<Watching | null>(null);
@@ -27,30 +38,46 @@ const WatchingContext = createContext<Watching | null>(null);
 export const PermissionContext = createContext<PermissionState>("unknown");
 
 /**
- * One event stream for the whole window, and the notifications it raises.
+ * One event stream per machine, and the notifications they raise.
  *
- * Mounted once above the routes: a second subscription would mean a second
- * socket, and every notification twice.
+ * Mounted once above the routes. Each machine gets its own socket with its own
+ * reconnect, because a Mac that has gone to sleep must not stop the others'
+ * events arriving.
  */
 export function LiveDaemon({ children }: { children: ReactNode }) {
-  const [taskId, setTaskId] = useState<number | null>(null);
+  const { machines } = useMachines();
+  const [watched, setWatched] = useState<Watched | null>(null);
   const focused = useWindowFocus();
+  const permission = useAskNotificationPermission();
 
   // Only suppress for a window the user is actually looking at. A backgrounded
   // window showing a terminal is exactly when a notification is wanted, so
   // focus has to be watched rather than sampled once.
-  const watching = focused ? taskId : null;
+  const visible = focused ? watched : null;
 
-  const { notify, permission } = useNotifications(watching);
-  useEvents(notify);
-
-  const value = useMemo(() => ({ taskId, watch: setTaskId }), [taskId]);
+  const value = useMemo(() => ({ watched, watch: setWatched }), [watched]);
 
   return (
     <PermissionContext.Provider value={permission}>
-      <WatchingContext.Provider value={value}>{children}</WatchingContext.Provider>
+      <WatchingContext.Provider value={value}>
+        {machines.map(({ machine, connection }) => (
+          <DaemonProvider key={machine.id} machineId={machine.id} connection={connection}>
+            <MachineStream
+              watching={visible?.machineId === machine.id ? visible.taskId : null}
+            />
+          </DaemonProvider>
+        ))}
+        {children}
+      </WatchingContext.Provider>
     </PermissionContext.Provider>
   );
+}
+
+/** One machine's events, feeding its query cache and its notifications. */
+function MachineStream({ watching }: { watching: number | null }) {
+  const notify = useNotifications(watching);
+  useEvents(notify);
+  return null;
 }
 
 /** Whether this window has focus, kept current. */

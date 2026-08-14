@@ -10,8 +10,10 @@ start a conversation first.
 **The desktop app never touches agents, tmux, git, or SQLite.**
 
 `forge-daemon` owns all of that and exposes it over HTTP/WS. `apps/desktop/src-tauri`
-is a window shell: it opens a window, and later raises notifications and reads
-the keychain. Concretely, a change is rejected if it adds a storage crate
+is a window shell: it opens a window, raises notifications, reads the keychain
+for remote machines' tokens, and opens Terminal on an ssh session (SPEC D18).
+Everything it does natively is about *reaching* a daemon rather than doing its
+work. Concretely, a change is rejected if it adds a storage crate
 (rusqlite, sled, …), a process-spawning crate, or a git crate to
 `apps/desktop/src-tauri/Cargo.toml`. CI enforces this with
 `scripts/check-d3-boundary.py`, which allowlists the shell's dependencies — so

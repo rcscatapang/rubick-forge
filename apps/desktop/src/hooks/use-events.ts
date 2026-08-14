@@ -2,9 +2,9 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 
 import type { EventRecord } from "@/lib/api-types";
-import { useDaemon } from "@/lib/connection";
+import { useDaemon, useMachineId } from "@/lib/connection";
 import { socketUrl } from "@/lib/daemon";
-import { invalidateFor } from "@/lib/queries";
+import { invalidateFor, keysFor } from "@/lib/queries";
 
 /** How long to wait before reconnecting, per attempt. */
 const RETRY_DELAYS_MS = [500, 1_000, 2_000, 5_000, 10_000];
@@ -18,6 +18,7 @@ const RETRY_DELAYS_MS = [500, 1_000, 2_000, 5_000, 10_000];
  */
 export function useEvents(onEvent?: (event: EventRecord) => void) {
   const connection = useDaemon();
+  const machine = useMachineId();
   const queries = useQueryClient();
 
   const notify = useRef(onEvent);
@@ -40,14 +41,19 @@ export function useEvents(onEvent?: (event: EventRecord) => void) {
       socket = new WebSocket(socketUrl(connection, "ws/events", { after: lastSeen }));
 
       socket.onopen = () => {
+        // Everything read while this machine was unreachable is suspect, and
+        // a query that errored will not retry on its own. An open socket is
+        // the moment its answers are worth asking for again — which is what
+        // makes coming back automatic rather than a restart.
         attempt = 0;
+        void queries.invalidateQueries({ queryKey: keysFor(machine).all });
       };
 
       socket.onmessage = (message) => {
         const event = JSON.parse(message.data as string) as EventRecord;
         lastSeen = event.id;
 
-        invalidateFor(queries, event.kind, "task_id" in event ? event.task_id : undefined);
+        invalidateFor(queries, machine, event.kind, "task_id" in event ? event.task_id : undefined);
         notify.current?.(event);
       };
 
@@ -66,5 +72,5 @@ export function useEvents(onEvent?: (event: EventRecord) => void) {
       clearTimeout(retry);
       socket?.close();
     };
-  }, [connection, queries]);
+  }, [connection, machine, queries]);
 }

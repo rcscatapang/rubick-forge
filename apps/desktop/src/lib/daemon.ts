@@ -14,6 +14,27 @@ export interface DaemonConnection {
   token: string;
 }
 
+const TOKEN_KEY = "forge.daemon.token";
+const URL_KEY = "forge.daemon.url";
+
+/**
+ * What the browser has been told about the *local* daemon.
+ *
+ * Only this one is remembered here. Remote machines are the machines list's
+ * business, and their tokens are the keychain's.
+ */
+export function storedConnection(): DaemonConnection {
+  return {
+    url: localStorage.getItem(URL_KEY) ?? DEFAULT_DAEMON_URL,
+    token: localStorage.getItem(TOKEN_KEY) ?? "",
+  };
+}
+
+export function rememberConnection(connection: DaemonConnection): void {
+  localStorage.setItem(URL_KEY, connection.url);
+  localStorage.setItem(TOKEN_KEY, connection.token);
+}
+
 /** An absolute API URL, with any query parameters appended. */
 export function apiUrl(
   connection: Pick<DaemonConnection, "url">,

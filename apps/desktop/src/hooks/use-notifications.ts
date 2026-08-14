@@ -35,24 +35,13 @@ export function prefsFrom(settings: Record<string, string> | undefined): Notific
 export type PermissionState = "unknown" | "granted" | "denied";
 
 /**
- * Turn the daemon's events into native notifications.
+ * Ask macOS for permission to notify, once.
  *
- * This is the whole promise of walking away: the agent asks for something,
- * finishes, or breaks, and the Mac says so. Anything else it said would be
- * noise, and noise gets notifications turned off.
+ * Kept apart from raising them: with several machines there are several event
+ * streams, and one permission prompt between them.
  */
-export function useNotifications(
-  /** The task whose terminal is on screen, when this window has focus. */
-  watching?: number | null,
-) {
-  const tasks = useTasks();
-  const projects = useProjects();
-  const settings = useSettings();
+export function useAskNotificationPermission(): PermissionState {
   const [permission, setPermission] = useState<PermissionState>("unknown");
-
-  // The last kind announced per task, so an agent that keeps asking while
-  // nobody answers does not restack.
-  const announced = useRef(new Map<number, NotifiedKind>());
 
   useEffect(() => {
     let cancelled = false;
@@ -74,6 +63,28 @@ export function useNotifications(
       cancelled = true;
     };
   }, []);
+
+  return permission;
+}
+
+/**
+ * Turn one daemon's events into native notifications.
+ *
+ * This is the whole promise of walking away: the agent asks for something,
+ * finishes, or breaks, and the Mac says so. Anything else it said would be
+ * noise, and noise gets notifications turned off.
+ */
+export function useNotifications(
+  /** The task whose terminal is on screen, when this window has focus. */
+  watching?: number | null,
+) {
+  const tasks = useTasks();
+  const projects = useProjects();
+  const settings = useSettings();
+
+  // The last kind announced per task, so an agent that keeps asking while
+  // nobody answers does not restack.
+  const announced = useRef(new Map<number, NotifiedKind>());
 
   const prefs = prefsFrom(settings.data?.settings);
 
@@ -108,5 +119,5 @@ export function useNotifications(
     sendNotification({ title: notification.title, body: notification.body });
   }, []);
 
-  return { notify, permission };
+  return notify;
 }

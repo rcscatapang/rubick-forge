@@ -93,7 +93,7 @@ describe("a task row", () => {
 
     await waitFor(() =>
       expect(screen.getByRole("link", { name: "Terminal" }).getAttribute("href")).toBe(
-        "/sessions/3",
+        "/machines/local/sessions/3",
       ),
     );
   });

@@ -14,7 +14,7 @@ vi.mock("@tauri-apps/plugin-notification", () => ({
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
-import { useNotifications } from "@/hooks/use-notifications";
+import { useAskNotificationPermission, useNotifications } from "@/hooks/use-notifications";
 import type { EventRecord } from "@/lib/api-types";
 import { DaemonProvider } from "@/lib/connection";
 import { daemonReturning } from "@/test/harness";
@@ -68,11 +68,11 @@ describe("raising notifications", () => {
   it("does not restack while an agent keeps asking unanswered", async () => {
     stubDaemon();
     const { result } = renderHook(() => useNotifications(null), { wrapper });
-    await waitFor(() => expect(result.current.permission).toBe("granted"));
+    await waitFor(() => expect(result.current).toBeInstanceOf(Function));
 
-    result.current.notify(waiting(1));
-    result.current.notify(waiting(2));
-    result.current.notify(waiting(3));
+    result.current(waiting(1));
+    result.current(waiting(2));
+    result.current(waiting(3));
 
     expect(sendNotification).toHaveBeenCalledTimes(1);
   });
@@ -80,12 +80,12 @@ describe("raising notifications", () => {
   it("notifies again once something else has happened to that task", async () => {
     stubDaemon();
     const { result } = renderHook(() => useNotifications(null), { wrapper });
-    await waitFor(() => expect(result.current.permission).toBe("granted"));
+    await waitFor(() => expect(result.current).toBeInstanceOf(Function));
 
-    result.current.notify(waiting(1));
+    result.current(waiting(1));
     // The user answered, the agent got on with it, and now it is asking again.
-    result.current.notify(working(2));
-    result.current.notify(waiting(3));
+    result.current(working(2));
+    result.current(waiting(3));
 
     expect(sendNotification).toHaveBeenCalledTimes(2);
   });
@@ -95,10 +95,10 @@ describe("raising notifications", () => {
     isPermissionGranted.mockResolvedValue(false);
     requestPermission.mockResolvedValue("default");
 
-    const { result } = renderHook(() => useNotifications(null), { wrapper });
+    const { result } = renderHook(() => useAskNotificationPermission());
 
     await waitFor(() => expect(requestPermission).toHaveBeenCalledTimes(1));
-    expect(result.current.permission).toBe("unknown");
+    expect(result.current).toBe("unknown");
   });
 
   it("reports an explicit refusal, so the app can explain it", async () => {
@@ -106,8 +106,8 @@ describe("raising notifications", () => {
     isPermissionGranted.mockResolvedValue(false);
     requestPermission.mockResolvedValue("denied");
 
-    const { result } = renderHook(() => useNotifications(null), { wrapper });
+    const { result } = renderHook(() => useAskNotificationPermission());
 
-    await waitFor(() => expect(result.current.permission).toBe("denied"));
+    await waitFor(() => expect(result.current).toBe("denied"));
   });
 });
