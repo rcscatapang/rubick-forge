@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The main window. The daemon is reached over HTTP/WS from the webview; the only native capabilities are a folder picker for registering a repository and opening a path in Finder or an editor.",
+  "description": "The main window. The daemon is reached over HTTP/WS from the webview; the only native capabilities are a folder picker for registering a repository, opening a path in Finder or an editor, and native notifications when an agent needs you.",
   "windows": [
     "main"
   ],
@@ -9,6 +9,7 @@
     "core:default",
     "dialog:allow-open",
     "opener:allow-open-path",
-    "opener:allow-open-url"
+    "opener:allow-open-url",
+    "notification:default"
   ]
 }

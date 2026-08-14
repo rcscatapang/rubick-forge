@@ -7,6 +7,7 @@ mod events;
 mod extract;
 mod health;
 mod projects;
+mod settings;
 mod tasks;
 mod terminal;
 
@@ -70,6 +71,7 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/adapters", get(adapters::list))
+        .route("/settings", get(settings::list).patch(settings::patch))
         .route("/events", get(events::list))
         .route("/ws/events", get(events::stream))
         .route("/ws/sessions/{id}/terminal", get(terminal::stream))
@@ -88,6 +90,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/tasks/{id}/git", get(tasks::git_status))
         .route("/tasks/{id}/sessions", get(tasks::sessions))
+        .route("/sessions/{id}", get(tasks::session))
         .route("/tasks/{id}/start", axum::routing::post(tasks::start))
         .route("/tasks/{id}/stop", axum::routing::post(tasks::stop))
         .route("/tasks/{id}/restart", axum::routing::post(tasks::restart))

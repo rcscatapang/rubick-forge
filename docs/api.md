@@ -365,6 +365,28 @@ session, and the agent inside it, are untouched.
 a human attached in their own terminal. A small app window will crop what
 everyone sees, and there is nothing Forge can do about that from its side.
 
+## Settings
+
+Daemon-wide preferences that every client shares — notification toggles, the
+worktree root. Deliberately untyped: what a setting means is the business of
+whoever reads it.
+
+### `GET /settings`
+
+```json
+{ "settings": { "notify.agent_waiting": "false", "worktree_root": "/trees" } }
+```
+
+### `PATCH /settings`
+
+```json
+{ "notify.agent_waiting": "false", "worktree_root": null }
+```
+
+Sets the keys named and leaves the rest alone; `null` clears one. Returns the
+settings as they now stand. A value over 4096 characters is a `400` — this is a
+preferences table, not a file store.
+
 ## Health
 
 ### `GET /health`

@@ -2,9 +2,9 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
 
 import { ActivityFeed } from "@/components/activity-feed";
+import { NotificationSettings } from "@/components/notification-settings";
 import { NewTaskForm } from "@/components/new-task";
 import { TaskRow } from "@/components/task-row";
-import { useEvents } from "@/hooks/use-events";
 import { needsAttention, type Project, type Task } from "@/lib/api-types";
 import { describe } from "@/lib/errors";
 import { useHealth, useProjectActions, useProjects, useTasks } from "@/lib/queries";
@@ -16,8 +16,6 @@ import { useHealth, useProjectActions, useProjects, useTasks } from "@/lib/queri
  * change touched, and these queries refetch themselves.
  */
 export function DashboardPage() {
-  useEvents();
-
   const health = useHealth();
   const projects = useProjects();
   const tasks = useTasks();
@@ -98,6 +96,7 @@ export function DashboardPage() {
       </section>
 
       <ActivityFeed />
+      <NotificationSettings />
     </main>
   );
 }

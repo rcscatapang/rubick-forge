@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams } from "react-router";
 
+import { useWatching } from "@/components/live-daemon";
 import { SessionTerminal, type ConnectionState } from "@/components/terminal";
 import { useDaemon } from "@/lib/connection";
+import { useSession } from "@/lib/queries";
 
 /**
  * One session's live terminal, filling the window.
@@ -13,10 +15,20 @@ import { useDaemon } from "@/lib/connection";
 export function SessionPage() {
   const { id } = useParams();
   const connection = useDaemon();
+  const { watch } = useWatching();
   const [readOnly, setReadOnly] = useState(false);
   const [state, setState] = useState<ConnectionState>("connecting");
 
   const sessionId = Number(id);
+  // Which task this session belongs to; the route knows only the session.
+  const session = useSession(sessionId);
+  const taskId = session.data?.task_id ?? null;
+
+  // While this is on screen, the app has no reason to tell you about it.
+  useEffect(() => {
+    watch(taskId);
+    return () => watch(null);
+  }, [taskId, watch]);
   if (!Number.isInteger(sessionId)) {
     return <p className="p-6 text-sm text-muted-foreground">No such session.</p>;
   }

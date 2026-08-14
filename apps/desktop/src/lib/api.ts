@@ -10,6 +10,7 @@ import type {
   ProjectList,
   Session,
   SessionList,
+  SettingsBody,
   Task,
   TaskList,
 } from "@/lib/api-types";
@@ -108,12 +109,17 @@ export function client(connection: DaemonConnection) {
       request<Task>(connection, `tasks/${id}/worktree/cleanup`, { method: "POST", body }),
 
     sessions: (taskId: number) => request<SessionList>(connection, `tasks/${taskId}/sessions`),
+    session: (id: number) => request<Session>(connection, `sessions/${id}`),
     start: (taskId: number) =>
       request<Session>(connection, `tasks/${taskId}/start`, { method: "POST" }),
     stop: (taskId: number) =>
       request<Session>(connection, `tasks/${taskId}/stop`, { method: "POST" }),
     restart: (taskId: number) =>
       request<Session>(connection, `tasks/${taskId}/restart`, { method: "POST" }),
+
+    settings: () => request<SettingsBody>(connection, "settings"),
+    updateSettings: (changes: Record<string, string | null>) =>
+      request<SettingsBody>(connection, "settings", { method: "PATCH", body: changes }),
 
     events: (params: { after?: number; limit?: number; task?: number; newest?: boolean } = {}) =>
       request<EventPage>(connection, "events", { params }),

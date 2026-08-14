@@ -97,7 +97,9 @@ describe("the dashboard", () => {
 
     renderApp(<DashboardPage />);
 
-    await waitFor(() => expect(screen.getByText(/needs you \(1\)/i)).toBeTruthy());
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /needs you \(1\)/i })).toBeTruthy(),
+    );
     // Once in its own section and once under its project.
     expect(screen.getAllByText("Task 2")).toHaveLength(2);
     expect(screen.getAllByText("Task 1")).toHaveLength(1);
@@ -109,7 +111,8 @@ describe("the dashboard", () => {
     renderApp(<DashboardPage />);
 
     await waitFor(() => expect(screen.getByText("Task 1")).toBeTruthy());
-    expect(screen.queryByText(/needs you/i)).toBeNull();
+    // By role: "An agent needs you" is also a notification toggle.
+    expect(screen.queryByRole("heading", { name: /needs you/i })).toBeNull();
   });
 
   it("asks for a repository when there are none", async () => {
