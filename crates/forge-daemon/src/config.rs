@@ -88,7 +88,13 @@ pub struct Config {
     pub stop_grace_secs: u64,
     /// How often live sessions are checked against reality.
     pub poll_secs: u64,
-    /// Other Macs this daemon answers for, when it hosts the bot.
+    /// Whether this daemon runs the task queue and dispatches to the others.
+    ///
+    /// A flag rather than a separate program (SPEC D25). Workers never know:
+    /// the hub reaches them over the same API the desktop app uses.
+    #[serde(default)]
+    pub hub: bool,
+    /// Other Macs this daemon answers for, when it hosts the bot or the hub.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub machines: Vec<MachineEntry>,
     #[serde(default, skip_serializing_if = "is_default_telegram")]
@@ -110,6 +116,7 @@ impl Default for Config {
             stop_keys: vec![DEFAULT_STOP_KEY.to_owned()],
             stop_grace_secs: 3,
             poll_secs: 2,
+            hub: false,
             machines: Vec::new(),
             telegram: TelegramConfig::default(),
         }
@@ -214,6 +221,9 @@ impl Config {
         if self.telegram.enabled && self.telegram.allowed_user_ids.is_empty() {
             return Err(ConfigError::UnguardedBot);
         }
+        if self.hub && self.machines.is_empty() {
+            return Err(ConfigError::HubWithoutMachines);
+        }
         Ok(())
     }
 }
@@ -266,6 +276,11 @@ pub enum ConfigError {
          anyone who finds the bot drive your agents"
     )]
     UnguardedBot,
+    #[error(
+        "hub = true with no [[machines]] would be a queue with nowhere to send \
+         anything; add the machines this hub dispatches to"
+    )]
+    HubWithoutMachines,
 }
 
 #[cfg(test)]

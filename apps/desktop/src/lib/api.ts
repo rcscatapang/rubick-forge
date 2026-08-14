@@ -2,6 +2,10 @@ import type {
   AdapterList,
   CommitRequest,
   DiffStat,
+  EnqueueRequest,
+  HubStatus,
+  QueuedTask,
+  QueueList,
   GitHubStatus,
   IssueList,
   ProjectRepo,
@@ -130,6 +134,13 @@ export function client(connection: DaemonConnection) {
 
     events: (params: { after?: number; limit?: number; task?: number; newest?: boolean } = {}) =>
       request<EventPage>(connection, "events", { params }),
+
+    hub: () => request<HubStatus>(connection, "hub"),
+    queue: () => request<QueueList>(connection, "hub/queue"),
+    enqueue: (body: EnqueueRequest) =>
+      request<QueuedTask>(connection, "hub/queue", { method: "POST", body }),
+    cancelQueued: (id: number) =>
+      request<void>(connection, `hub/queue/${id}`, { method: "DELETE" }),
 
     github: () => request<GitHubStatus>(connection, "github"),
     setGitHubToken: (token: string) =>

@@ -183,7 +183,10 @@ export type EventKind =
   | "pr_merged"
   | "pr_closed"
   | "checks_passed"
-  | "checks_failed";
+  | "checks_failed"
+  | "task_queued"
+  | "task_dispatched"
+  | "dispatch_failed";
 
 /** Mirrors `forge_core::StopReason`. */
 export type StopReason = "requested" | "exited" | "vanished";
@@ -215,7 +218,23 @@ export type ForgeEvent =
   | { kind: "pr_merged"; task_id: number; number: number; url: string }
   | { kind: "pr_closed"; task_id: number; number: number; url: string }
   | { kind: "checks_passed"; task_id: number; number: number; url: string }
-  | { kind: "checks_failed"; task_id: number; number: number; url: string };
+  | { kind: "checks_failed"; task_id: number; number: number; url: string }
+  | {
+      kind: "task_queued";
+      queued_id: number;
+      project_name: string;
+      title: string;
+      target: string | null;
+    }
+  | {
+      kind: "task_dispatched";
+      queued_id: number;
+      machine: string;
+      /** The task's id *on that machine*, which is not this daemon's. */
+      remote_task: number;
+      considered: string[];
+    }
+  | { kind: "dispatch_failed"; queued_id: number; machine: string; detail: string };
 
 /** Mirrors `forge_core::EventRecord`: a stored event, flattened. */
 export type EventRecord = { id: number; ts: Timestamp } & ForgeEvent;
@@ -341,4 +360,54 @@ export interface PullResponse {
 export interface CommitRequest {
   /** Defaults to the task's title. */
   message?: string;
+}
+
+/** Mirrors `forge_core::QueueState`. */
+export type QueueState = "queued" | "dispatched" | "cancelled";
+
+/**
+ * Mirrors `forge_core::QueuedTask`.
+ *
+ * Not a `Task`: it has no branch, worktree or session. It becomes a task on
+ * whichever machine takes it, and `remote_task` is that task's id *there*.
+ */
+export interface QueuedTask {
+  id: number;
+  project_name: string;
+  adapter: AdapterId;
+  title: string;
+  prompt: string | null;
+  /** A machine name, or `null` for "whichever machine can take it". */
+  target: string | null;
+  state: QueueState;
+  /** Why a queued row is still queued. */
+  reason: string | null;
+  machine: string | null;
+  remote_task: number | null;
+  /** Every machine that could have taken it, recorded before the choice. */
+  considered: string[];
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+/** The body of `GET /hub/queue`. */
+export interface QueueList {
+  queue: QueuedTask[];
+}
+
+/** The body of `GET /hub`. */
+export interface HubStatus {
+  hub: boolean;
+  /** Machine names this hub dispatches to, empty when it is not a hub. */
+  machines: string[];
+}
+
+/** The body of `POST /hub/queue`. */
+export interface EnqueueRequest {
+  project_name: string;
+  title: string;
+  adapter?: AdapterId;
+  prompt?: string;
+  /** Omitted for "whichever machine can take it". */
+  target?: string;
 }

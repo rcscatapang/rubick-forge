@@ -231,6 +231,7 @@ mod tests {
             .unwrap();
         let task = store
             .create_task(&NewTask {
+                idempotency_key: None,
                 project_id: project.id,
                 title: "Add adapters".into(),
                 adapter: AdapterId::ClaudeCode,

@@ -41,6 +41,12 @@ function describe(event: EventRecord): string {
       return `Checks passed on PR #${event.number}`;
     case "checks_failed":
       return `Checks failed on PR #${event.number}`;
+    case "task_queued":
+      return `Queued “${event.title}” for ${event.project_name}`;
+    case "task_dispatched":
+      return `Queued #${event.queued_id} → ${event.machine}`;
+    case "dispatch_failed":
+      return `Queued #${event.queued_id} could not go to ${event.machine}`;
   }
 }
 

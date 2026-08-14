@@ -14,8 +14,8 @@ mod timestamp;
 
 pub use adapter::{AdapterId, UnknownAdapterId};
 pub use entity::{
-    task_branch_name, tmux_session_name, AdapterSettings, ChecksState, Project, Session, Task,
-    TaskGitHub,
+    task_branch_name, tmux_session_name, AdapterSettings, ChecksState, Project, QueueState,
+    QueuedTask, Session, Task, TaskGitHub,
 };
 pub use event::{
     EventDecodeError, EventKind, EventRecord, ForgeEvent, StopReason, UnknownEventKind,

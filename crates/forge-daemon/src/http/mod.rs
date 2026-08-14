@@ -7,6 +7,7 @@ mod events;
 pub(crate) mod extract;
 mod github;
 mod health;
+mod hub;
 mod projects;
 mod settings;
 pub mod tasks;
@@ -107,6 +108,10 @@ pub fn router(state: AppState) -> Router {
             "/tasks/{id}/instruction",
             axum::routing::post(tasks::instruction),
         )
+        .route("/hub", get(hub::status))
+        .route("/hub/queue", get(hub::queue).post(hub::enqueue))
+        .route("/hub/queue/{id}", axum::routing::delete(hub::cancel))
+        .route("/fleet", get(hub::fleet))
         .route("/github", get(github::status))
         .route(
             "/github/token",

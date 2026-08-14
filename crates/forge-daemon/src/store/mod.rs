@@ -9,6 +9,7 @@ mod events;
 mod github;
 mod migrations;
 mod projects;
+mod queue;
 mod sessions;
 mod settings;
 mod tasks;
@@ -20,6 +21,7 @@ use rusqlite::Connection;
 
 pub use events::{EventPage, Query};
 pub use projects::{NewProject, ProjectError, ProjectPatch};
+pub use queue::NewQueuedTask;
 pub use sessions::SessionError;
 pub use tasks::{NewTask, TaskError, TaskPatch, TaskQuery};
 

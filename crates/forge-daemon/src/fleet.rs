@@ -42,12 +42,8 @@ pub trait Machine: Send + Sync {
     /// Every task, with its project name and live session filled in.
     fn tasks(&self) -> BoxFuture<'_, Result<Vec<FleetTask>, FleetError>>;
 
-    fn start(
-        &self,
-        project_id: i64,
-        title: String,
-        prompt: String,
-    ) -> BoxFuture<'_, Result<Task, FleetError>>;
+    /// Create a task and launch its agent.
+    fn start(&self, new: NewRemoteTask) -> BoxFuture<'_, Result<Task, FleetError>>;
 
     fn stop(&self, task_id: i64) -> BoxFuture<'_, Result<(), FleetError>>;
 
@@ -64,6 +60,21 @@ pub trait Machine: Send + Sync {
     /// Never returns: it reconnects for as long as the daemon runs. The local
     /// machine reads its own bus; a remote one opens a WebSocket.
     fn watch(&self, on_event: EventSink) -> BoxFuture<'_, ()>;
+}
+
+/// What to create on a machine.
+///
+/// One struct rather than five arguments: they travel together everywhere, and
+/// the last two are easy to transpose when they are both `Option<String>`.
+#[derive(Debug, Clone)]
+pub struct NewRemoteTask {
+    /// The project's id *on that machine*, which is not its id anywhere else.
+    pub project_id: i64,
+    pub title: String,
+    pub prompt: String,
+    pub adapter: AdapterId,
+    /// Names this attempt so a retry cannot create a second task.
+    pub idempotency_key: Option<String>,
 }
 
 /// What to do with each event a machine reports.
@@ -255,16 +266,18 @@ impl Machine for LocalMachine {
         })
     }
 
-    fn start(
-        &self,
-        project_id: i64,
-        title: String,
-        prompt: String,
-    ) -> BoxFuture<'_, Result<Task, FleetError>> {
+    fn start(&self, new: NewRemoteTask) -> BoxFuture<'_, Result<Task, FleetError>> {
         Box::pin(async move {
-            crate::http::tasks::create_and_start(&self.state, project_id, title, prompt)
-                .await
-                .map_err(|err| FleetError::Refused(err.message().to_owned()))
+            crate::http::tasks::create_and_start(
+                &self.state,
+                new.project_id,
+                new.title,
+                new.prompt,
+                new.adapter,
+                new.idempotency_key,
+            )
+            .await
+            .map_err(|err| FleetError::Refused(err.message().to_owned()))
         })
     }
 
@@ -468,30 +481,33 @@ impl Machine for RemoteMachine {
         })
     }
 
-    fn start(
-        &self,
-        project_id: i64,
-        title: String,
-        prompt: String,
-    ) -> BoxFuture<'_, Result<Task, FleetError>> {
+    fn start(&self, new: NewRemoteTask) -> BoxFuture<'_, Result<Task, FleetError>> {
         Box::pin(async move {
+            // A daemon that already made this task returns it rather than a
+            // second one, which is what makes a retry after a lost answer safe.
             let task: Task = self
                 .post(
                     "tasks",
                     serde_json::json!({
-                        "project_id": project_id,
-                        "title": title,
-                        "adapter": AdapterId::ClaudeCode,
-                        "initial_prompt": prompt,
+                        "idempotency_key": new.idempotency_key,
+                        "project_id": new.project_id,
+                        "title": new.title,
+                        "adapter": new.adapter,
+                        "initial_prompt": new.prompt,
                     }),
                 )
                 .await?;
 
-            let _: Session = self
-                .post(&format!("tasks/{}/start", task.id), serde_json::json!({}))
-                .await?;
-
-            Ok(task)
+            // Starting one that is already running is not a failure worth
+            // reporting: the caller asked for a running agent and has one.
+            match self
+                .post::<Session>(&format!("tasks/{}/start", task.id), serde_json::json!({}))
+                .await
+            {
+                Ok(_) => Ok(task),
+                Err(FleetError::Refused(detail)) if detail.contains("already running") => Ok(task),
+                Err(error) => Err(error),
+            }
         })
     }
 

@@ -19,9 +19,6 @@ use crate::git;
 use crate::github::api::{GitHub, GitHubError, Pat, RateLimit};
 use crate::github::{pull, remote};
 
-/// The keychain service the daemon's secrets are filed under.
-const KEYCHAIN_SERVICE: &str = "tech.cloverly.rubick-forge";
-
 /// The keychain account holding the GitHub personal access token.
 const PAT_ACCOUNT: &str = "github-pat";
 
@@ -34,24 +31,20 @@ const REQUIRED_SCOPE: &str = "repo";
 /// through the API then takes effect without a restart. The polling loop keeps
 /// its own long-lived client, which is where the ETag cache lives.
 pub fn client() -> Result<GitHub, ApiError> {
-    let token = keyring::Entry::new(KEYCHAIN_SERVICE, PAT_ACCOUNT)
-        .and_then(|entry| entry.get_password())
-        .map_err(|_| {
-            ApiError::new(
-                StatusCode::PRECONDITION_FAILED,
-                "github_unconfigured",
-                "No GitHub token has been saved. Add one in settings.",
-            )
-        })?;
+    let token = crate::secret(PAT_ACCOUNT).map_err(|_| {
+        ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "github_unconfigured",
+            "No GitHub token has been saved. Add one in settings.",
+        )
+    })?;
 
     GitHub::new(Pat::new(token)).map_err(from_github)
 }
 
 /// The stored token, or `None` when there is none.
 pub fn stored_client() -> Option<GitHub> {
-    let token = keyring::Entry::new(KEYCHAIN_SERVICE, PAT_ACCOUNT)
-        .and_then(|entry| entry.get_password())
-        .ok()?;
+    let token = crate::secret(PAT_ACCOUNT).ok()?;
 
     GitHub::new(Pat::new(token)).ok()
 }
@@ -118,7 +111,7 @@ pub async fn set_token(
         )));
     }
 
-    keyring::Entry::new(KEYCHAIN_SERVICE, PAT_ACCOUNT)
+    keyring::Entry::new(crate::KEYCHAIN_SERVICE, PAT_ACCOUNT)
         .and_then(|entry| entry.set_password(token))
         .map_err(|err| ApiError::internal(format!("cannot save the token: {err}")))?;
 
@@ -126,7 +119,7 @@ pub async fn set_token(
 }
 
 pub async fn forget_token(State(_): State<AppState>) -> ApiResult<StatusCode> {
-    if let Ok(entry) = keyring::Entry::new(KEYCHAIN_SERVICE, PAT_ACCOUNT) {
+    if let Ok(entry) = keyring::Entry::new(crate::KEYCHAIN_SERVICE, PAT_ACCOUNT) {
         // Deleting one that was never there is not a failure.
         let _ = entry.delete_credential();
     }
@@ -326,6 +319,9 @@ pub async fn task_from_issue(
         project.id,
         pull::issue_task_title(issue.number, &issue.title),
         pull::issue_prompt(issue.number, &issue.title, issue.body.as_deref()),
+        forge_core::AdapterId::ClaudeCode,
+        // Started by hand from a browser; nobody is retrying this.
+        None,
     )
     .await?;
 

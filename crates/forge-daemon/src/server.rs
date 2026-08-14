@@ -68,9 +68,10 @@ impl Daemon {
         }
     }
 
-    /// Start the Telegram bot and the GitHub poller, if either is configured.
+    /// Start the bot, the hub and the GitHub poller, whichever are configured.
     pub fn attend(&self) {
         crate::telegram::spawn(self.state.clone());
+        crate::hub::spawn(self.state.clone());
 
         // Always started: it reads the token itself, so one saved later begins
         // polling without a restart, and a revoked one stops.
