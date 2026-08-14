@@ -9,7 +9,8 @@
     "target": "ES2022",
     "moduleResolution": "bundler",
     "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
     "types": ["node"]
   },
-  "include": ["vite.config.ts"]
+  "include": ["vite.config.ts", "package.json"]
 }

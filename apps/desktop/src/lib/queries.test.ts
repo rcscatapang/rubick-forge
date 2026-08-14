@@ -1,7 +1,10 @@
 import { QueryClient } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 
-import { invalidateFor, keys } from "@/lib/queries";
+import { invalidateFor, keysFor } from "@/lib/queries";
+
+const MACHINE = "local";
+const keys = keysFor(MACHINE);
 
 function watched() {
   const queries = new QueryClient();
@@ -23,7 +26,7 @@ describe("what an event makes stale", () => {
   it("always refetches the activity feed", () => {
     const { queries, invalidate } = watched();
 
-    invalidateFor(queries, "status_changed", 7);
+    invalidateFor(queries, MACHINE, "status_changed", 7);
 
     expect(invalidated(invalidate).some((asked) => asked.queryKey.includes("events"))).toBe(true);
   });
@@ -31,7 +34,7 @@ describe("what an event makes stale", () => {
   it("refetches a project change's tasks too, since removing one takes them with it", () => {
     const { queries, invalidate } = watched();
 
-    invalidateFor(queries, "project_removed", null);
+    invalidateFor(queries, MACHINE, "project_removed", null);
 
     const filters = invalidated(invalidate);
     expect(filters.some((asked) => asked.queryKey.includes("projects"))).toBe(true);
@@ -41,7 +44,7 @@ describe("what an event makes stale", () => {
   it("does not refetch every task's git and sessions on one task's change", () => {
     const { queries, invalidate } = watched();
 
-    invalidateFor(queries, "status_changed", 7);
+    invalidateFor(queries, MACHINE, "status_changed", 7);
 
     const list = invalidated(invalidate).find(
       (asked) => JSON.stringify(asked.queryKey) === JSON.stringify(keys.tasks()),
@@ -53,7 +56,7 @@ describe("what an event makes stale", () => {
   it("refetches the changed task's own detail", () => {
     const { queries, invalidate } = watched();
 
-    invalidateFor(queries, "agent_waiting", 7);
+    invalidateFor(queries, MACHINE, "agent_waiting", 7);
 
     expect(
       invalidated(invalidate).some(
@@ -65,11 +68,11 @@ describe("what an event makes stale", () => {
   it("has nothing task-shaped to refetch for a project event", () => {
     const { queries, invalidate } = watched();
 
-    invalidateFor(queries, "project_registered", null);
+    invalidateFor(queries, MACHINE, "project_registered", null);
 
     expect(
       invalidated(invalidate).some(
-        (asked) => asked.queryKey.length > 2 && asked.queryKey[1] === "tasks",
+        (asked) => asked.queryKey.length > 3 && asked.queryKey[2] === "tasks",
       ),
     ).toBe(false);
   });

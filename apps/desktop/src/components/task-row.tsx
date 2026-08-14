@@ -1,10 +1,13 @@
+import { invoke } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { Link } from "react-router";
 import { toast } from "sonner";
 
 import { StatusBadge } from "@/components/status-badge";
 import { ADAPTER_LABELS, isLive, type Task } from "@/lib/api-types";
+import { useMachineId } from "@/lib/connection";
 import { describe } from "@/lib/errors";
+import { isLocal, type Machine } from "@/lib/machines";
 import { useSessions, useTaskActions, useTaskGit } from "@/lib/queries";
 
 /**
@@ -13,7 +16,8 @@ import { useSessions, useTaskActions, useTaskGit } from "@/lib/queries";
  * Actions are disabled by state rather than hidden, so the row does not
  * reshuffle itself every time an agent changes what it is doing.
  */
-export function TaskRow({ task }: { task: Task }) {
+export function TaskRow({ task, machine }: { task: Task; machine?: Machine }) {
+  const machineId = useMachineId();
   const actions = useTaskActions();
   const git = useTaskGit(task.id);
   const sessions = useSessions(task.id);
@@ -74,17 +78,44 @@ export function TaskRow({ task }: { task: Task }) {
         {session && (
           <Link
             className="rounded border border-border px-2 py-1"
-            to={`/sessions/${session.id}`}
+            to={`/machines/${machineId}/sessions/${session.id}`}
           >
             Terminal
           </Link>
+        )}
+
+        {/* SPEC D18: ssh is not a transport, only an escape hatch to a real
+            terminal on the Mac the session is actually running on. */}
+        {session && machine?.sshHost && (
+          <button
+            type="button"
+            className="rounded border border-border px-2 py-1"
+            onClick={() =>
+              void run(
+                "Opening a terminal",
+                invoke("open_ssh_session", {
+                  host: machine.sshHost,
+                  tmuxName: session.tmux_name,
+                }),
+              )
+            }
+          >
+            Terminal over ssh
+          </button>
         )}
 
         {task.worktree_path && (
           <>
             <button
               type="button"
-              className="rounded border border-border px-2 py-1"
+              className="rounded border border-border px-2 py-1 disabled:opacity-50"
+              // A path on another Mac means nothing to this one's Finder.
+              disabled={machine !== undefined && !isLocal(machine)}
+              title={
+                machine !== undefined && !isLocal(machine)
+                  ? "The worktree is on another Mac"
+                  : undefined
+              }
               onClick={() => void openPath(task.worktree_path as string)}
             >
               Open folder

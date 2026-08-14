@@ -12,7 +12,7 @@ Everything the daemon remembers lives in
 | File | What it is |
 |------|------------|
 | `forge.db` | SQLite database (WAL mode) |
-| `daemon.toml` | Bind address, port, machine name, worktree root override |
+| `daemon.toml` | Bind addresses, port, machine name, worktree root override |
 | `token` | The bearer token, `0600` |
 | `logs/` | Rotated daemon logs |
 
@@ -30,6 +30,7 @@ existing config, token and database are reused.
 ```toml
 bind = "127.0.0.1"
 port = 8787
+# tailscale_bind = true
 machine = "Ryan's MacBook Pro"
 stop_keys = ["C-c"]
 stop_grace_secs = 3
@@ -37,9 +38,12 @@ poll_secs = 2
 # worktree_root = "/Users/you/worktrees"
 ```
 
-- `bind` — loopback by default. A Tailscale address is a valid explicit
-  opt-in; `0.0.0.0` is refused at load, because Forge never exposes itself to
-  a network it did not choose.
+- `bind` — loopback by default. `0.0.0.0` is refused at load, because Forge
+  never exposes itself to a network it did not choose.
+- `tailscale_bind` — off unless set. A *second* listener on the tailnet, on the
+  same port, with loopback kept either way. `true` finds this Mac's Tailscale
+  address on its own interfaces; a string binds that address instead. See
+  [remote.md](remote.md).
 - `port` — fixed rather than discovered, so the app knows where to look.
 - `machine` — defaults to the Mac's own name; labels this daemon in a
   multi-machine UI.

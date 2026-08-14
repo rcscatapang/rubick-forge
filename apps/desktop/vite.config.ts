@@ -4,11 +4,16 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 
+import { version } from "./package.json";
+
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+
+  // The app's own version, so it can say when a daemon's is too far from it.
+  define: { __APP_VERSION__: JSON.stringify(version) },
 
   test: {
     environment: "jsdom",

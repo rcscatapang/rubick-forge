@@ -12,7 +12,11 @@ is there.
 | | |
 |---|---|
 | **Daemon** | Projects, tasks, sessions, worktrees, history, settings, and every decision about them |
-| **App** | The daemon's URL and token — and nothing else |
+| **App** | Which machines exist, and how to reach each one — and nothing else |
+
+The machines list is the app's alone: no daemon knows about any other. Remote
+tokens live in the macOS keychain, never in the list. See
+[remote.md](remote.md).
 
 Everything on screen is read from the daemon over HTTP, and kept current by its
 event stream. Nothing polls except the health check, which is how the app
@@ -57,7 +61,14 @@ the affected part of the screen refetches.
 - **Actions** are disabled by state rather than hidden, so a row does not
   reshuffle every time an agent changes what it is doing. A running task cannot
   be deleted or have its worktree removed; stop it first.
-- **Activity** is the daemon's own event history, newest first.
+- **Activity** is every machine's event history merged, newest first, badged
+  with the machine once there is more than one.
+- **Machines** is where a second Mac gets added. With only this one, its
+  section is unlabelled and the dashboard looks exactly as it did before there
+  were machines at all.
+
+Each machine renders its own section from its own daemon, so one Mac being
+asleep shows as unreachable on that section and changes nothing else.
 
 No test or build status. That arrives with the GitHub integration.
 

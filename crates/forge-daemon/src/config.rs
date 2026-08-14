@@ -13,12 +13,30 @@ pub const DEFAULT_PORT: u16 = 8787;
 /// What both agent CLIs treat as "stop what you are doing".
 const DEFAULT_STOP_KEY: &str = "C-c";
 
+/// The second, optional bind: this Mac's tailnet address.
+///
+/// Untagged so `daemon.toml` can say either `tailscale_bind = true` or
+/// `tailscale_bind = "100.101.102.103"`, which are the two ways anyone
+/// actually wants to express this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum TailscaleBind {
+    /// `true` finds the Tailscale interface's address; `false` is the default.
+    Auto(bool),
+    /// An address to bind instead of looking one up.
+    Address(IpAddr),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Address to bind. `0.0.0.0` is rejected on load.
     pub bind: IpAddr,
     pub port: u16,
+    /// An extra listener on the tailnet, on the same port. Off unless asked
+    /// for: reachable from another machine is a decision, not a default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tailscale_bind: Option<TailscaleBind>,
     /// Label for this daemon in a multi-machine UI. Filled in with the Mac's
     /// own name when the file is first written.
     pub machine: Option<String>,
@@ -38,6 +56,7 @@ impl Default for Config {
         Self {
             bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port: DEFAULT_PORT,
+            tailscale_bind: None,
             machine: None,
             worktree_root: None,
             stop_keys: vec![DEFAULT_STOP_KEY.to_owned()],
@@ -50,6 +69,21 @@ impl Default for Config {
 impl Config {
     pub fn socket_addr(&self) -> SocketAddr {
         SocketAddr::new(self.bind, self.port)
+    }
+
+    /// The extra tailnet address to listen on, or `None` when off.
+    ///
+    /// Resolving is deferred to start-up rather than done on load: Tailscale
+    /// may not be up yet when launchd starts the daemon at login, and a config
+    /// file that fails to parse for that reason would be a lie about the file.
+    pub async fn tailnet_addr(&self) -> Result<Option<SocketAddr>, ConfigError> {
+        let address = match self.tailscale_bind {
+            None | Some(TailscaleBind::Auto(false)) => return Ok(None),
+            Some(TailscaleBind::Address(explicit)) => explicit,
+            Some(TailscaleBind::Auto(true)) => crate::tailnet::address().await?,
+        };
+
+        Ok(Some(SocketAddr::new(address, self.port)))
     }
 
     /// The name to show for this daemon, detected if the file did not say.
@@ -108,6 +142,19 @@ impl Config {
         if self.bind.is_unspecified() {
             return Err(ConfigError::UnspecifiedBind(self.bind));
         }
+        // The same rule for the second listener. `tailscale_bind = "0.0.0.0"`
+        // would be a wildcard bind wearing a reassuring name.
+        if let Some(TailscaleBind::Address(address)) = self.tailscale_bind {
+            if address.is_unspecified() {
+                return Err(ConfigError::UnspecifiedBind(address));
+            }
+            if !crate::tailnet::is_tailnet(address) {
+                tracing::warn!(
+                    %address,
+                    "tailscale_bind is not a Tailscale address; binding it anyway"
+                );
+            }
+        }
         if self.port == 0 {
             return Err(ConfigError::ZeroPort);
         }
@@ -155,6 +202,8 @@ pub enum ConfigError {
     },
     #[error("bind = \"{0}\" would expose the daemon beyond this machine; Forge only binds a specific interface")]
     UnspecifiedBind(IpAddr),
+    #[error(transparent)]
+    Tailnet(#[from] crate::tailnet::TailnetError),
     #[error("port = 0 would pick a random port the app cannot find")]
     ZeroPort,
     #[error("poll_secs = 0 would spin instead of polling")]
@@ -277,6 +326,78 @@ mod tests {
             Config::load_or_create(&path),
             Err(ConfigError::ZeroPoll)
         ));
+    }
+
+    #[test]
+    fn the_second_listener_is_off_unless_the_file_asks() {
+        let config = Config::default();
+
+        assert_eq!(config.tailscale_bind, None);
+        assert!(!toml::to_string_pretty(&config)
+            .unwrap()
+            .contains("tailscale_bind"));
+    }
+
+    #[tokio::test]
+    async fn no_tailscale_bind_means_one_listener() {
+        assert_eq!(Config::default().tailnet_addr().await.unwrap(), None);
+
+        let off = Config {
+            tailscale_bind: Some(TailscaleBind::Auto(false)),
+            ..Config::default()
+        };
+        assert_eq!(off.tailnet_addr().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn an_explicit_tailscale_bind_is_taken_at_its_word() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("daemon.toml");
+        std::fs::write(&path, "tailscale_bind = \"100.101.102.103\"\nport = 9000\n").unwrap();
+
+        let config = Config::load_or_create(&path).unwrap();
+
+        assert_eq!(
+            config.tailnet_addr().await.unwrap().map(|a| a.to_string()),
+            Some("100.101.102.103:9000".to_owned())
+        );
+    }
+
+    #[test]
+    fn asking_for_the_tailnet_by_name_parses() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("daemon.toml");
+        std::fs::write(&path, "tailscale_bind = true\n").unwrap();
+
+        let config = Config::load_or_create(&path).unwrap();
+
+        assert_eq!(config.tailscale_bind, Some(TailscaleBind::Auto(true)));
+    }
+
+    #[test]
+    fn a_wildcard_second_listener_is_refused_like_the_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("daemon.toml");
+        std::fs::write(&path, "tailscale_bind = \"0.0.0.0\"\n").unwrap();
+
+        assert!(matches!(
+            Config::load_or_create(&path),
+            Err(ConfigError::UnspecifiedBind(_))
+        ));
+    }
+
+    #[test]
+    fn a_tailnet_bind_survives_a_round_trip_through_the_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("daemon.toml");
+
+        let written = Config {
+            tailscale_bind: Some(TailscaleBind::Address("100.64.0.7".parse().unwrap())),
+            ..Config::default()
+        };
+        written.write(&path).unwrap();
+
+        assert_eq!(Config::load_or_create(&path).unwrap(), written);
     }
 
     #[test]
