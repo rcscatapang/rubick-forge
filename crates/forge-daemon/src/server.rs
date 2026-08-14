@@ -1,5 +1,6 @@
 //! Bootstrapping: state directory, config, token, database, then serve.
 
+use std::future::IntoFuture;
 use std::net::SocketAddr;
 
 use tokio::net::TcpListener;
@@ -88,21 +89,72 @@ impl Daemon {
         });
     }
 
+    /// Every address to listen on: the configured bind, and the tailnet when
+    /// `tailscale_bind` asks for one.
+    ///
+    /// Loopback stays whatever happens to the tailnet: the app on this Mac
+    /// must not lose its daemon because Tailscale is down.
+    pub async fn listen_addrs(&self) -> Result<Vec<SocketAddr>, StartupError> {
+        let mut addrs = vec![self.addr];
+
+        if let Some(tailnet) = self.state.config.tailnet_addr().await? {
+            if tailnet != self.addr {
+                addrs.push(tailnet);
+            }
+        }
+
+        Ok(addrs)
+    }
+
     /// Serve until SIGINT or SIGTERM.
     pub async fn serve(self) -> Result<(), StartupError> {
-        let listener = TcpListener::bind(self.addr)
-            .await
-            .map_err(|source| StartupError::Bind {
-                addr: self.addr,
-                source,
-            })?;
+        self.serve_until(shutdown_signal()).await
+    }
 
-        tracing::info!(addr = %self.addr, version = VERSION, "listening");
+    /// Serve every configured address until `shutdown` resolves.
+    ///
+    /// Split out from [`serve`](Self::serve) so a test can end it without
+    /// signalling the process running it.
+    pub async fn serve_until(
+        self,
+        shutdown: impl std::future::Future<Output = ()>,
+    ) -> Result<(), StartupError> {
+        let addrs = self.listen_addrs().await?;
+        let router = router(self.state);
 
-        axum::serve(listener, router(self.state))
-            .with_graceful_shutdown(shutdown_signal())
-            .await
-            .map_err(StartupError::Serve)
+        // One signal, many servers: each waits on its own receiver so that a
+        // SIGTERM drains all of them rather than the first one to notice.
+        let (stop_all, _) = tokio::sync::broadcast::channel::<()>(1);
+        let mut servers = Vec::with_capacity(addrs.len());
+
+        for addr in addrs {
+            let listener = TcpListener::bind(addr)
+                .await
+                .map_err(|source| StartupError::Bind { addr, source })?;
+
+            tracing::info!(%addr, version = VERSION, "listening");
+
+            let mut stop = stop_all.subscribe();
+            servers.push(tokio::spawn(
+                axum::serve(listener, router.clone())
+                    .with_graceful_shutdown(async move {
+                        let _ = stop.recv().await;
+                    })
+                    .into_future(),
+            ));
+        }
+
+        shutdown.await;
+        let _ = stop_all.send(());
+
+        for server in servers {
+            match server.await {
+                Ok(result) => result.map_err(StartupError::Serve)?,
+                Err(source) => return Err(StartupError::Serve(std::io::Error::other(source))),
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -166,6 +218,48 @@ mod tests {
         assert!(state_dir.db_path().exists());
         assert!(state_dir.logs_dir().is_dir());
         assert_eq!(daemon.addr.port(), crate::config::DEFAULT_PORT);
+    }
+
+    #[tokio::test]
+    async fn loopback_is_the_only_listener_until_the_tailnet_is_asked_for() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = StateDir::at(temp.path());
+
+        let daemon = Daemon::bootstrap(&state_dir).unwrap();
+
+        assert_eq!(daemon.listen_addrs().await.unwrap(), vec![daemon.addr]);
+    }
+
+    #[tokio::test]
+    async fn a_tailnet_bind_adds_a_listener_and_keeps_loopback() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = StateDir::at(temp.path());
+        state_dir.ensure().unwrap();
+        std::fs::write(
+            state_dir.config_path(),
+            "tailscale_bind = \"100.101.102.103\"\n",
+        )
+        .unwrap();
+
+        let daemon = Daemon::bootstrap(&state_dir).unwrap();
+        let addrs = daemon.listen_addrs().await.unwrap();
+
+        assert_eq!(addrs.len(), 2);
+        assert_eq!(addrs[0].ip().to_string(), "127.0.0.1");
+        assert_eq!(addrs[1].ip().to_string(), "100.101.102.103");
+        assert_eq!(addrs[0].port(), addrs[1].port());
+    }
+
+    #[tokio::test]
+    async fn a_tailnet_bind_that_repeats_the_first_one_is_not_bound_twice() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = StateDir::at(temp.path());
+        state_dir.ensure().unwrap();
+        std::fs::write(state_dir.config_path(), "tailscale_bind = \"127.0.0.1\"\n").unwrap();
+
+        let daemon = Daemon::bootstrap(&state_dir).unwrap();
+
+        assert_eq!(daemon.listen_addrs().await.unwrap().len(), 1);
     }
 
     #[test]

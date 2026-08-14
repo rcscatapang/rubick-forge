@@ -19,6 +19,7 @@ pub mod server;
 pub mod sessions;
 pub mod slug;
 pub mod store;
+pub mod tailnet;
 pub mod terminal;
 pub mod token;
 pub mod worktree;
