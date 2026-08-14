@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { ActivityFeed } from "@/components/activity-feed";
 import { MachineChip } from "@/components/machine-chip";
 import { GitHubSettings } from "@/components/github-settings";
+import { HubQueue } from "@/components/hub-queue";
 import { IssueBrowser } from "@/components/issue-browser";
 import { MachineSettings } from "@/components/machine-settings";
 import { NotificationSettings } from "@/components/notification-settings";
@@ -124,6 +125,8 @@ function MachineBoard({ machine, alone }: { machine: Machine; alone: boolean }) 
           </ul>
         </section>
       )}
+
+      <HubQueue projects={projects.data?.projects ?? []} />
 
       <NewTaskForm projects={projects.data?.projects ?? []} />
 

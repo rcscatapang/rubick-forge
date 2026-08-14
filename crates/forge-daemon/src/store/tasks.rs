@@ -14,6 +14,9 @@ const COLUMNS: &str = "id, project_id, title, adapter, base_branch, branch, work
 /// which needs the id — the row is created first, then completed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewTask {
+    /// Names this attempt, so a retry returns the first task rather than a
+    /// second one. `None` for a create nobody will repeat.
+    pub idempotency_key: Option<String>,
     pub project_id: i64,
     pub title: String,
     pub adapter: AdapterId,
@@ -57,6 +60,27 @@ impl Store {
     ///
     /// It starts `stopped` — nothing is running until something starts it —
     /// and on the base branch, which is where a task without a worktree runs.
+    /// The task already created under `key`, if there is one.
+    ///
+    /// What makes `POST /tasks` safe to retry: a client whose request succeeded
+    /// but whose answer was lost asks again with the same key and is given the
+    /// task it already made.
+    pub fn task_by_key(&self, key: &str) -> Result<Option<Task>, StoreError> {
+        self.with(|conn| {
+            conn.query_row(
+                &format!("SELECT {COLUMNS} FROM tasks WHERE idempotency_key = ?1"),
+                rusqlite::params![key],
+                decode,
+            )
+            .map(Some)
+            .or_else(|err| match err {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(StoreError::Query(other)),
+            })
+        })?
+        .transpose()
+    }
+
     pub fn create_task(&self, new: &NewTask) -> Result<Task, TaskError> {
         let now = Timestamp::now();
 
@@ -64,8 +88,8 @@ impl Store {
             conn.execute(
                 "INSERT INTO tasks
                      (project_id, title, adapter, base_branch, branch, worktree_path,
-                      initial_prompt, status, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?4, NULL, ?5, ?6, ?7, ?7)",
+                      initial_prompt, status, idempotency_key, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?4, NULL, ?5, ?6, ?7, ?8, ?8)",
                 rusqlite::params![
                     new.project_id,
                     new.title,
@@ -73,6 +97,7 @@ impl Store {
                     new.base_branch,
                     new.initial_prompt,
                     AgentStatus::Stopped.as_str(),
+                    new.idempotency_key,
                     now.to_string(),
                 ],
             )
@@ -310,6 +335,7 @@ mod tests {
 
     fn new_task(project_id: i64) -> NewTask {
         NewTask {
+            idempotency_key: None,
             project_id,
             title: "Add adapters".into(),
             adapter: AdapterId::ClaudeCode,

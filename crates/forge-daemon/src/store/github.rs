@@ -171,6 +171,7 @@ mod tests {
 
         let task = store
             .create_task(&NewTask {
+                idempotency_key: None,
                 project_id: project.id,
                 title: "Fix the flaky test".into(),
                 adapter: AdapterId::ClaudeCode,

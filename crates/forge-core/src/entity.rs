@@ -245,3 +245,62 @@ impl ChecksState {
         }
     }
 }
+
+/// Where a queued task is in its short life.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueState {
+    /// Waiting for a machine that can take it.
+    #[default]
+    Queued,
+    /// Created on a machine; the real task lives there now.
+    Dispatched,
+    Cancelled,
+}
+
+impl QueueState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Dispatched => "dispatched",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Anything unrecognised reads as still queued, which is the safe answer:
+    /// a row this daemon does not understand has certainly not been dispatched
+    /// by it.
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "dispatched" => Self::Dispatched,
+            "cancelled" => Self::Cancelled,
+            _ => Self::Queued,
+        }
+    }
+}
+
+/// One thing waiting on the hub's queue.
+///
+/// A queued task is not a [`Task`]: no branch, no worktree, no session. It
+/// becomes a task on whichever machine takes it, and `remote_task` is that
+/// task's id *there* — ids are per-daemon.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedTask {
+    pub id: i64,
+    /// Matched against machines' projects by name, never by path (SPEC D25).
+    pub project_name: String,
+    pub adapter: AdapterId,
+    pub title: String,
+    pub prompt: Option<String>,
+    /// A machine name, or `None` for "whichever machine can take it".
+    pub target: Option<String>,
+    pub state: QueueState,
+    /// Why a queued row is still queued.
+    pub reason: Option<String>,
+    pub machine: Option<String>,
+    pub remote_task: Option<i64>,
+    /// Every machine that could have taken it, recorded before the choice.
+    pub considered: Vec<String>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}

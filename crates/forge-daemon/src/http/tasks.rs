@@ -18,6 +18,10 @@ use crate::worktree::{self, BranchDisposal};
 
 #[derive(Debug, Deserialize)]
 pub struct CreateRequest {
+    /// Names this attempt so it is safe to repeat. A second create with the
+    /// same key returns the first task rather than making another.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
     pub project_id: i64,
     pub title: String,
     pub adapter: AdapterId,
@@ -308,6 +312,14 @@ pub async fn create(
         return Err(ApiError::bad_request("a task needs a title"));
     }
 
+    // Answered before anything is created, so a retry whose first answer was
+    // lost gets the task it already made rather than a second one.
+    if let Some(key) = request.idempotency_key.as_deref() {
+        if let Some(existing) = state.store.task_by_key(key)? {
+            return Ok((StatusCode::OK, Json(existing)));
+        }
+    }
+
     let project = state.store.project(request.project_id)?.ok_or_else(|| {
         ApiError::not_found(format!(
             "there is no project with id {}",
@@ -327,6 +339,7 @@ pub async fn create(
     }
 
     let task = state.store.create_task(&NewTask {
+        idempotency_key: request.idempotency_key.clone(),
         project_id: project.id,
         title: request.title.trim().to_owned(),
         adapter: request.adapter,
@@ -367,20 +380,28 @@ pub async fn create_and_start(
     project_id: i64,
     title: String,
     prompt: String,
+    adapter: AdapterId,
+    idempotency_key: Option<String>,
 ) -> ApiResult<Task> {
-    let (_, Json(task)) = create(
+    let (status, Json(task)) = create(
         State(state.clone()),
         Json(CreateRequest {
+            idempotency_key,
             project_id,
             title,
-            // The bot has no way to ask which agent, so it takes the default.
-            adapter: AdapterId::ClaudeCode,
+            adapter,
             base_branch: None,
             initial_prompt: Some(prompt),
             use_worktree: true,
         }),
     )
     .await?;
+
+    // The task already existed, so it was already started too. Starting it
+    // again would be an error about a session that is not this caller's fault.
+    if status == StatusCode::OK {
+        return Ok(task);
+    }
 
     match start(State(state.clone()), UrlPath(task.id)).await {
         Ok(_) => Ok(task),

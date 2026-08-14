@@ -6,7 +6,7 @@ import {
 } from "@tanstack/react-query";
 
 import { client } from "@/lib/api";
-import type { EventKind } from "@/lib/api-types";
+import type { EnqueueRequest, EventKind } from "@/lib/api-types";
 import { useDaemon, useMachineId } from "@/lib/connection";
 import type { MachineConnection } from "@/lib/machine-registry";
 
@@ -36,6 +36,8 @@ export function keysFor(machine: string) {
     projectRepo: (id: number) => [...all, "projects", id, "github"] as const,
     projectIssues: (id: number) => [...all, "projects", id, "github", "issues"] as const,
     taskDiff: (id: number) => [...all, "tasks", id, "github", "diff"] as const,
+    hub: () => [...all, "hub"] as const,
+    queue: () => [...all, "hub", "queue"] as const,
   };
 }
 
@@ -166,6 +168,11 @@ export function invalidateFor(
     void queries.invalidateQueries({ queryKey: keys.githubLinks() });
   }
 
+  // A queue row moving is the one thing that changes the queue.
+  if (kind === "task_queued" || kind === "task_dispatched" || kind === "dispatch_failed") {
+    void queries.invalidateQueries({ queryKey: keys.queue() });
+  }
+
   // A task's git facts and session list both hang off its id.
   if (taskId != null) {
     void queries.invalidateQueries({ queryKey: [...keys.all, "tasks", taskId] });
@@ -218,6 +225,42 @@ export function useTaskDiff(id: number, enabled: boolean) {
     queryFn: () => api.taskDiff(id),
     enabled,
   });
+}
+
+/** Whether this machine's daemon is the hub. */
+export function useHub() {
+  const api = useClient();
+  const keys = useKeys();
+  return useQuery({ queryKey: keys.hub(), queryFn: () => api.hub() });
+}
+
+/** The hub's queue, asked for only on the machine that has one. */
+export function useQueue(enabled: boolean) {
+  const api = useClient();
+  const keys = useKeys();
+  return useQuery({ queryKey: keys.queue(), queryFn: () => api.queue(), enabled });
+}
+
+export function useHubActions() {
+  const api = useClient();
+  const queries = useQueryClient();
+  const keys = useKeys();
+
+  const refresh = () => {
+    void queries.invalidateQueries({ queryKey: keys.queue() });
+    void queries.invalidateQueries({ queryKey: keys.events() });
+  };
+
+  return {
+    enqueue: useMutation({
+      mutationFn: (body: EnqueueRequest) => api.enqueue(body),
+      onSuccess: refresh,
+    }),
+    cancel: useMutation({
+      mutationFn: (id: number) => api.cancelQueued(id),
+      onSuccess: refresh,
+    }),
+  };
 }
 
 export function useGitHubActions() {

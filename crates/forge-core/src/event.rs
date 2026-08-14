@@ -28,10 +28,13 @@ pub enum EventKind {
     PrClosed,
     ChecksPassed,
     ChecksFailed,
+    TaskQueued,
+    TaskDispatched,
+    DispatchFailed,
 }
 
 impl EventKind {
-    pub const ALL: [EventKind; 17] = [
+    pub const ALL: [EventKind; 20] = [
         Self::ProjectRegistered,
         Self::ProjectRemoved,
         Self::TaskCreated,
@@ -49,6 +52,9 @@ impl EventKind {
         Self::PrClosed,
         Self::ChecksPassed,
         Self::ChecksFailed,
+        Self::TaskQueued,
+        Self::TaskDispatched,
+        Self::DispatchFailed,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -70,6 +76,9 @@ impl EventKind {
             Self::PrClosed => "pr_closed",
             Self::ChecksPassed => "checks_passed",
             Self::ChecksFailed => "checks_failed",
+            Self::TaskQueued => "task_queued",
+            Self::TaskDispatched => "task_dispatched",
+            Self::DispatchFailed => "dispatch_failed",
         }
     }
 
@@ -226,6 +235,29 @@ pub enum ForgeEvent {
         number: i64,
         url: String,
     },
+    /// Something was put on the hub's queue. No task exists yet.
+    TaskQueued {
+        queued_id: i64,
+        project_name: String,
+        title: String,
+        /// A machine name, or `None` for "whichever can take it".
+        target: Option<String>,
+    },
+    /// The hub created it on a machine, which is where the real task now is.
+    TaskDispatched {
+        queued_id: i64,
+        machine: String,
+        /// The task's id *on that machine*, which is not this daemon's.
+        remote_task: i64,
+        /// Every machine that could have taken it, so the choice is auditable.
+        considered: Vec<String>,
+    },
+    /// A dispatch was attempted and refused. The row stays queued.
+    DispatchFailed {
+        queued_id: i64,
+        machine: String,
+        detail: String,
+    },
 }
 
 impl ForgeEvent {
@@ -248,13 +280,22 @@ impl ForgeEvent {
             Self::PrClosed { .. } => EventKind::PrClosed,
             Self::ChecksPassed { .. } => EventKind::ChecksPassed,
             Self::ChecksFailed { .. } => EventKind::ChecksFailed,
+            Self::TaskQueued { .. } => EventKind::TaskQueued,
+            Self::TaskDispatched { .. } => EventKind::TaskDispatched,
+            Self::DispatchFailed { .. } => EventKind::DispatchFailed,
         }
     }
 
     /// The `events.task_id` column value.
     pub fn task_id(&self) -> Option<i64> {
         match self {
-            Self::ProjectRegistered { .. } | Self::ProjectRemoved { .. } => None,
+            Self::ProjectRegistered { .. }
+            | Self::ProjectRemoved { .. }
+            // A queued row has no task yet, and a dispatched one's id belongs
+            // to the machine it went to rather than to this daemon.
+            | Self::TaskQueued { .. }
+            | Self::TaskDispatched { .. }
+            | Self::DispatchFailed { .. } => None,
             Self::TaskCreated { task_id, .. }
             | Self::TaskDeleted { task_id }
             | Self::TaskFinished { task_id, .. }
@@ -421,6 +462,23 @@ mod tests {
                 task_id: 2,
                 number: 41,
                 url: "https://github.com/o/n/pull/41".into(),
+            },
+            EventKind::TaskQueued => ForgeEvent::TaskQueued {
+                queued_id: 5,
+                project_name: "forge".into(),
+                title: "Fix the flaky test".into(),
+                target: None,
+            },
+            EventKind::TaskDispatched => ForgeEvent::TaskDispatched {
+                queued_id: 5,
+                machine: "Mac mini".into(),
+                remote_task: 12,
+                considered: vec!["Mac mini".into(), "MacBook Pro".into()],
+            },
+            EventKind::DispatchFailed => ForgeEvent::DispatchFailed {
+                queued_id: 5,
+                machine: "Mac mini".into(),
+                detail: "claude is not installed there".into(),
             },
         }
     }

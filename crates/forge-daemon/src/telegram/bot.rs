@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use forge_core::{EventRecord, ForgeEvent};
+use forge_core::{AdapterId, EventRecord, ForgeEvent, QueueState};
 use tokio::sync::Mutex;
 
 use super::api::{Button, Telegram, TelegramError, Update};
@@ -12,7 +12,7 @@ use super::callbacks::{self, Answer, MachineRef, Outstanding, Prompt, Tap};
 use super::commands::{self, Command, Resolution};
 use super::format::{status_icon, Reply};
 use crate::config::TelegramConfig;
-use crate::fleet::{Fleet, FleetError, FleetTask};
+use crate::fleet::{Fleet, FleetError, FleetTask, NewRemoteTask};
 use crate::http::AppState;
 
 /// Where the long-poll offset is kept, so a restart does not replay what the
@@ -33,21 +33,10 @@ impl Allowlist {
     }
 }
 
-/// One remote machine's event stream, and where it sits in the fleet.
-#[derive(Clone)]
-pub struct RemoteStream {
-    /// Position in the fleet, which is what a button payload records.
-    pub index: usize,
-    pub name: String,
-    pub url: String,
-    pub token: String,
-}
-
 pub struct Bot {
     telegram: Telegram,
-    fleet: Fleet,
+    fleet: Arc<Fleet>,
     state: AppState,
-    remotes: Vec<RemoteStream>,
     allowlist: Allowlist,
     /// The last question announced per session, which is what makes a stale
     /// button tap expire rather than answer the wrong thing.
@@ -57,16 +46,14 @@ pub struct Bot {
 impl Bot {
     pub fn new(
         telegram: Telegram,
-        fleet: Fleet,
+        fleet: Arc<Fleet>,
         state: AppState,
         config: &TelegramConfig,
-        remotes: Vec<RemoteStream>,
     ) -> Self {
         Self {
             telegram,
             fleet,
             state,
-            remotes,
             allowlist: Allowlist {
                 ids: config.allowed_user_ids.clone(),
             },
@@ -78,11 +65,10 @@ impl Bot {
     pub async fn run(self) {
         let bot = Arc::new(self);
 
-        // This Mac's own bus, and one socket per other Mac. Each reconnects on
-        // its own, so a machine that sleeps costs only its own stream.
-        tokio::spawn(Arc::clone(&bot).watch_events());
-        for remote in bot.remotes.clone() {
-            tokio::spawn(Arc::clone(&bot).watch_remote(remote));
+        // Every machine's events, this Mac's included. Each stream reconnects
+        // on its own, so a machine that sleeps costs only its own.
+        for index in 0..bot.fleet.len() {
+            tokio::spawn(Arc::clone(&bot).watch_machine(index));
         }
 
         let mut offset = bot.stored_offset();
@@ -177,6 +163,76 @@ impl Bot {
             Command::Start { project, prompt } => self.start(&project, prompt).await,
             Command::Stop { task } => self.stop(&task).await,
             Command::Ask { task, text } => self.ask(&task, text).await,
+            Command::Queue => self.queue().await,
+            Command::Cancel { queued } => self.cancel(&queued).await,
+        }
+    }
+
+    /// The hub's queue, and what happened to each row.
+    ///
+    /// Only meaningful on the hub; a worker's queue is empty by construction,
+    /// which reads correctly as "nothing waiting".
+    async fn queue(&self) -> Reply {
+        if !self.state.config.hub {
+            return Reply::plain("This Mac is not the hub, so it has no queue.");
+        }
+
+        let Ok(rows) = self.state.store.queue() else {
+            return Reply::plain("I cannot read the queue.");
+        };
+
+        if rows.is_empty() {
+            return Reply::plain("The queue is empty.");
+        }
+
+        let lines: Vec<String> = rows
+            .iter()
+            .rev()
+            .take(20)
+            .map(|row| match row.state {
+                QueueState::Dispatched => format!(
+                    "#{} {} → {}",
+                    row.id,
+                    row.title,
+                    row.machine.as_deref().unwrap_or("?")
+                ),
+                QueueState::Cancelled => format!("#{} {} · cancelled", row.id, row.title),
+                QueueState::Queued => format!(
+                    "#{} {} · waiting{}",
+                    row.id,
+                    row.title,
+                    row.reason
+                        .as_deref()
+                        .map(|why| format!(" — {why}"))
+                        .unwrap_or_default()
+                ),
+            })
+            .collect();
+
+        Reply::plain(&lines.join("\n"))
+    }
+
+    async fn cancel(&self, reference: &str) -> Reply {
+        if !self.state.config.hub {
+            return Reply::plain("This Mac is not the hub, so it has no queue.");
+        }
+
+        let Ok(id) = reference.trim().trim_start_matches('#').parse::<i64>() else {
+            return Reply::plain("Give me a queued task's number, as /queue lists them.");
+        };
+
+        match self.state.store.cancel_queued(id) {
+            // No event: a cancellation is not one of the three the spec names,
+            // and inventing one so a dashboard refreshes would put a lie on the
+            // bus. A dashboard sees it on its next read.
+            Ok(true) => Reply::plain(&format!("Cancelled #{id}.")),
+            // Either it was never there or it has already gone somewhere; both
+            // mean the same thing to whoever typed this.
+            Ok(false) => Reply::plain(&format!(
+                "#{id} is not waiting. A task that was dispatched is stopped \
+                 with /stop instead."
+            )),
+            Err(_) => Reply::plain("I cannot reach the queue."),
         }
     }
 
@@ -238,6 +294,47 @@ impl Bot {
     }
 
     async fn start(&self, project: &str, prompt: String) -> Reply {
+        // On the hub, `/start` queues: a phone has no way to say which Mac, and
+        // choosing one is exactly what the queue is for. Everywhere else there
+        // is no queue, so it runs here.
+        if self.state.config.hub {
+            return self.enqueue(project, prompt).await;
+        }
+
+        self.start_directly(project, prompt).await
+    }
+
+    /// Put it on the hub's queue and let placement choose the machine.
+    async fn enqueue(&self, project: &str, prompt: String) -> Reply {
+        let title = title_from(&prompt);
+
+        let queued = self.state.store.enqueue(&crate::store::NewQueuedTask {
+            project_name: project.to_owned(),
+            adapter: AdapterId::ClaudeCode,
+            title: title.clone(),
+            prompt: Some(prompt),
+            target: None,
+        });
+
+        match queued {
+            Ok(row) => {
+                let _ = self.state.bus.publish(ForgeEvent::TaskQueued {
+                    queued_id: row.id,
+                    project_name: row.project_name.clone(),
+                    title: row.title.clone(),
+                    target: None,
+                });
+
+                Reply::plain(&format!(
+                    "Queued #{} “{title}” for {project}. I will say where it lands.",
+                    row.id
+                ))
+            }
+            Err(error) => Reply::plain(&format!("Could not queue that: {error}")),
+        }
+    }
+
+    async fn start_directly(&self, project: &str, prompt: String) -> Reply {
         let (candidates, failed) = self.fleet.project_candidates().await;
         let names: Vec<_> = candidates.iter().map(|(_, c)| c.clone()).collect();
 
@@ -259,7 +356,16 @@ impl Bot {
             return Reply::plain("That machine is no longer in my configuration.");
         };
 
-        match machine.start(chosen.id, title_from(&prompt), prompt).await {
+        let attempt = NewRemoteTask {
+            project_id: chosen.id,
+            title: title_from(&prompt),
+            prompt,
+            adapter: AdapterId::ClaudeCode,
+            // Typed by a person who will see whether it worked.
+            idempotency_key: None,
+        };
+
+        match machine.start(attempt).await {
             Ok(task) => Reply::plain(&format!(
                 "Started “{}” on {} ({}).",
                 task.title, chosen.machine, chosen.name
@@ -385,74 +491,32 @@ impl Bot {
         }
     }
 
-    /// Follow one remote machine's event stream, reconnecting for as long as
-    /// the daemon runs.
-    async fn watch_remote(self: Arc<Self>, remote: RemoteStream) {
-        let mut attempt = 0usize;
-        let mut after: Option<i64> = None;
-
-        loop {
-            match self.stream_once(&remote, &mut after).await {
-                Ok(()) => attempt = 0,
-                Err(error) => {
-                    tracing::debug!(machine = remote.name, %error, "a remote event stream ended");
-                }
-            }
-
-            let wait = RETRY_DELAYS[attempt.min(RETRY_DELAYS.len() - 1)];
-            attempt = attempt.saturating_add(1);
-            tokio::time::sleep(Duration::from_secs(wait)).await;
-        }
-    }
-
-    /// One connection's worth of a remote machine's events.
+    /// Follow one machine's events for as long as the daemon runs.
     ///
-    /// `after` is carried across reconnects, so a machine that drops off the
-    /// tailnet and comes back replays what was missed instead of losing it.
-    async fn stream_once(
-        &self,
-        remote: &RemoteStream,
-        after: &mut Option<i64>,
-    ) -> Result<(), String> {
-        use futures_util::StreamExt;
+    /// Reconnecting and resuming belong to the fleet — "how to reach that Mac"
+    /// is its job, not the bot's. All the bot supplies is what to do with each
+    /// event that arrives.
+    async fn watch_machine(self: Arc<Self>, index: usize) {
+        let Some(machine) = self.fleet.at(index) else {
+            return;
+        };
 
-        // Browsers cannot set headers on a handshake, so the daemon accepts the
-        // token in the query string on `/ws` routes; this client does the same.
-        let mut url = format!(
-            "{}/ws/events?token={}",
-            websocket_base(&remote.url),
-            remote.token
-        );
-        if let Some(seen) = after {
-            url.push_str(&format!("&after={seen}"));
-        }
+        let who = MachineRef::from_fleet_index(index);
+        // Only a remote machine's name is worth saying; the local one is the
+        // Mac the reader is already thinking of.
+        let label = (index > 0).then(|| machine.name().to_owned());
 
-        // The URL has a bearer token in it, and tungstenite puts the URL in its
-        // errors. Nothing derived from it reaches a log.
-        let (mut socket, _) = tokio_tungstenite::connect_async(&url)
-            .await
-            .map_err(|_| format!("cannot open {}'s event stream", remote.name))?;
+        let bot = Arc::clone(&self);
+        machine
+            .watch(Box::new(move |record| {
+                let bot = Arc::clone(&bot);
+                let label = label.clone();
 
-        while let Some(frame) = socket.next().await {
-            let frame = frame.map_err(|_| format!("{}'s event stream ended", remote.name))?;
-            let Ok(text) = frame.into_text() else {
-                continue;
-            };
-
-            let Ok(record) = serde_json::from_str::<EventRecord>(&text) else {
-                continue;
-            };
-
-            *after = Some(record.id);
-            self.push_from(
-                MachineRef::Remote(remote.index - 1),
-                Some(&remote.name),
-                record,
-            )
+                Box::pin(async move {
+                    bot.push_from(who, label.as_deref(), record).await;
+                })
+            }))
             .await;
-        }
-
-        Ok(())
     }
 
     async fn answer(&self, data: &str, answer: Answer) -> String {
@@ -478,19 +542,6 @@ impl Bot {
         } else {
             "Denied.".to_owned()
         }
-    }
-
-    /// Push the three signal kinds from this Mac's own bus.
-    async fn watch_events(self: Arc<Self>) {
-        let mut events = self.state.bus.subscribe();
-
-        while let Ok(record) = events.recv().await {
-            self.push(record).await;
-        }
-    }
-
-    async fn push(&self, record: EventRecord) {
-        self.push_from(MachineRef::Local, None, record).await;
     }
 
     /// Announce one event, from whichever machine it happened on.
@@ -566,6 +617,43 @@ impl Bot {
                     Vec::new(),
                 )
             }
+            // The hub's own events, which belong to no session.
+            ForgeEvent::TaskQueued {
+                queued_id,
+                project_name,
+                title,
+                target,
+            } => (
+                Reply::plain(&format!(
+                    "📥 Queued #{queued_id} {title} ({project_name}){}",
+                    target
+                        .as_deref()
+                        .map(|name| format!(" for {name}"))
+                        .unwrap_or_default()
+                )),
+                Vec::new(),
+            ),
+            ForgeEvent::TaskDispatched {
+                queued_id,
+                machine,
+                remote_task,
+                ..
+            } => (
+                Reply::plain(&format!(
+                    "📤 Queued #{queued_id} went to {machine} as task {remote_task}"
+                )),
+                Vec::new(),
+            ),
+            ForgeEvent::DispatchFailed {
+                queued_id,
+                machine,
+                detail,
+            } => (
+                Reply::plain(&format!(
+                    "⚠️ Queued #{queued_id} could not go to {machine}: {detail}"
+                )),
+                Vec::new(),
+            ),
             // Anything else means the question on that session is no longer the
             // one a button in the chat refers to.
             _ => {
@@ -617,20 +705,6 @@ impl Bot {
                 }
             }
         }
-    }
-}
-
-/// An `http(s)` base as its WebSocket equivalent.
-///
-/// Only the scheme is rewritten: a blanket replace turns a host that happens to
-/// contain "http" into nonsense.
-fn websocket_base(url: &str) -> String {
-    let trimmed = url.trim_end_matches('/');
-
-    match trimmed.split_once("://") {
-        Some(("http", rest)) => format!("ws://{rest}"),
-        Some(("https", rest)) => format!("wss://{rest}"),
-        _ => trimmed.to_owned(),
     }
 }
 
@@ -703,7 +777,9 @@ const HELP: &str = "\
 /agents — what is running, and where
 /start <project> <what to do> — create a task and launch its agent
 /stop <task> — stop a task's agent
-/ask <task> <text> — type something into a running agent";
+/ask <task> <text> — type something into a running agent
+/queue — what is on the hub's queue, and where each row went
+/cancel <n> — take a waiting row off the queue";
 
 #[cfg(test)]
 mod tests {
@@ -735,20 +811,6 @@ mod tests {
     fn a_prompt_with_no_words_still_produces_a_title() {
         assert_eq!(title_from("   "), "Task from Telegram");
         assert_eq!(title_from("..."), "Task from Telegram");
-    }
-
-    #[test]
-    fn only_the_scheme_becomes_a_websocket_one() {
-        assert_eq!(
-            websocket_base("http://100.64.0.1:8787"),
-            "ws://100.64.0.1:8787"
-        );
-        assert_eq!(websocket_base("https://mini:8787/"), "wss://mini:8787");
-        // A blanket replace would have made this "ws://ws-mini:8787".
-        assert_eq!(
-            websocket_base("http://http-mini:8787"),
-            "ws://http-mini:8787"
-        );
     }
 
     #[test]

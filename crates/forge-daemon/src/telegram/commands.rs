@@ -22,12 +22,21 @@ pub enum Command {
         task: String,
         text: String,
     },
+    /// The hub's queue: what is on it, and what happened to each row.
+    Queue,
+    /// Take a row off the queue before it goes anywhere.
+    Cancel {
+        queued: String,
+    },
     Help,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ParseError {
-    #[error("I only understand /status, /agents, /start, /stop, /ask and /help.")]
+    #[error(
+        "I only understand /status, /agents, /queue, /start, /stop, /ask, \
+         /cancel and /help."
+    )]
     Unknown,
     #[error("/start needs a project and something to do: /start forge fix the flaky test")]
     StartNeedsPrompt,
@@ -35,6 +44,8 @@ pub enum ParseError {
     StopNeedsTask,
     #[error("/ask needs a task and something to say: /ask 12 yes, go ahead")]
     AskNeedsText,
+    #[error("/cancel needs a queued task's number: /cancel 3")]
+    CancelNeedsRow,
 }
 
 /// Parse one message.
@@ -53,6 +64,11 @@ pub fn parse(message: &str) -> Option<Result<Command, ParseError>> {
     Some(match word {
         "status" => Ok(Command::Status),
         "agents" => Ok(Command::Agents),
+        "queue" => Ok(Command::Queue),
+        "cancel" if !arguments.is_empty() => Ok(Command::Cancel {
+            queued: arguments.to_owned(),
+        }),
+        "cancel" => Err(ParseError::CancelNeedsRow),
         "help" | "start_help" => Ok(Command::Help),
         "start" => match arguments.split_once(char::is_whitespace) {
             Some((project, prompt)) if !prompt.trim().is_empty() => Ok(Command::Start {
@@ -176,6 +192,28 @@ mod tests {
                 text: "yes, go ahead".into(),
             }))
         );
+    }
+
+    #[test]
+    fn the_queue_commands_parse() {
+        assert_eq!(parse("/queue"), Some(Ok(Command::Queue)));
+        assert_eq!(
+            parse("/cancel 3"),
+            Some(Ok(Command::Cancel { queued: "3".into() }))
+        );
+        assert_eq!(parse("/cancel"), Some(Err(ParseError::CancelNeedsRow)));
+    }
+
+    #[test]
+    fn starting_on_no_particular_machine_is_the_default() {
+        // `/start` says nothing about a machine, and the hub decides. Naming
+        // one is `/start on <machine> …`, which is deliberately not a thing:
+        // it would be ambiguous with a project called "on".
+        let Some(Ok(Command::Start { project, .. })) = parse("/start forge do the thing") else {
+            panic!("should parse");
+        };
+
+        assert_eq!(project, "forge");
     }
 
     #[test]

@@ -51,6 +51,10 @@ poll_secs = 2
 - `stop_keys`, `stop_grace_secs` — how a stop asks an agent to leave before
   killing its session. See [runtime.md](runtime.md).
 - `poll_secs` — how often live sessions are checked against reality.
+- `hub` — off unless set. Turns this daemon into the fleet's task queue, which
+  needs `[[machines]]`. See [hub.md](hub.md).
+- `[[machines]]`, `[telegram]` — the fleet this daemon speaks for, and the bot.
+  See [telegram.md](telegram.md).
 
 Unknown keys are an error, not a silent default: a typo should be loud.
 

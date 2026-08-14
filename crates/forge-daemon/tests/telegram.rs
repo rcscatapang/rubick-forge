@@ -150,9 +150,9 @@ fn bot_for(harness: &Harness, base: &str, allowed: Vec<i64>) -> Bot {
     };
 
     let telegram = Telegram::with_base(BotToken::new("stub-token"), base).unwrap();
-    let fleet = Fleet::new(harness.state.clone(), &[], &[]);
+    let fleet = std::sync::Arc::new(Fleet::new(harness.state.clone(), &[], &[]));
 
-    Bot::new(telegram, fleet, harness.state.clone(), &config, Vec::new())
+    Bot::new(telegram, fleet, harness.state.clone(), &config)
 }
 
 #[tokio::test]
