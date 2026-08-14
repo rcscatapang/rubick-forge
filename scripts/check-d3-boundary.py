@@ -20,7 +20,10 @@ SHELL_CRATE = "rubick-forge-desktop"
 ALLOWED = {
     "tauri",
     "tauri-build",
+    "tempfile",  # dev-only, for the shell's own tests
     "tauri-plugin-notification",  # native macOS notifications
+    "tauri-plugin-dialog",  # the native folder picker for registering a repo
+    "tauri-plugin-opener",  # "open in Finder/editor" on a worktree path
     "keyring",  # remote-machine tokens in the macOS keychain
     "serde",
     "serde_json",

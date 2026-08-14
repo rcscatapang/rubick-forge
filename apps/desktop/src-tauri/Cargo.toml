@@ -3,7 +3,7 @@
 # It must never depend on a storage crate (rusqlite, sled, …), a process-
 # spawning crate, or a git crate. Everything that touches agents, tmux, git or
 # SQLite lives in `forge-daemon` and is reached over HTTP/WS. Adding such a
-# dependency here is a spec violation, not a refactor — see SPEC §2.
+# dependency here is a spec violation, not a refactor.
 [package]
 name = "rubick-forge-desktop"
 description = "Rubick Forge desktop app: a window onto the daemon"
@@ -27,3 +27,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+
+[dev-dependencies]
+tempfile = { workspace = true }

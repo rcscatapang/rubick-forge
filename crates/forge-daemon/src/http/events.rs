@@ -24,6 +24,9 @@ pub struct Cursor {
     pub limit: Option<usize>,
     /// Restrict the feed to one task.
     pub task: Option<i64>,
+    /// Return the end of history rather than its beginning.
+    #[serde(default)]
+    pub newest: bool,
     /// Read by the auth middleware, and accepted here so it is not a
     /// "query string is not valid" rejection.
     #[serde(default, rename = "token")]
@@ -36,6 +39,7 @@ impl Cursor {
             after: self.after,
             limit: self.limit,
             task_id: self.task,
+            newest: self.newest,
         }
     }
 }
@@ -66,8 +70,10 @@ async fn relay(socket: WebSocket, state: AppState, cursor: Cursor) {
     if cursor.after.is_some() {
         let mut query = cursor.to_query();
         // Backfill pages at the store's own maximum, not the client's `limit`,
-        // which only bounds a single REST page.
+        // which only bounds a single REST page — and always forwards, whatever
+        // end the client asked a REST page to come from.
         query.limit = None;
+        query.newest = false;
 
         loop {
             let page = match state.store.events(query) {
