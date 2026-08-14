@@ -195,3 +195,101 @@ async fn divergence_is_counted_against_a_tracking_branch() {
     assert_eq!(diverged.ahead, Some(1));
     assert_eq!(diverged.behind, Some(0));
 }
+
+#[tokio::test]
+async fn a_clean_worktree_has_nothing_to_commit() {
+    let temp = repo();
+    commit(temp.path(), "a.txt", "one\n");
+
+    assert!(git::diff_stat(temp.path()).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_diffstat_counts_what_would_be_committed() {
+    let temp = repo();
+    commit(temp.path(), "a.txt", "one\n");
+    std::fs::write(temp.path().join("a.txt"), "one\ntwo\n").unwrap();
+
+    let stat = git::diff_stat(temp.path()).await.unwrap();
+
+    assert_eq!(stat.files, 1);
+    assert_eq!(stat.insertions, 1);
+    assert_eq!(stat.paths, ["a.txt"]);
+    assert!(!stat.is_empty());
+}
+
+#[tokio::test]
+async fn an_untracked_file_counts_even_though_it_is_not_in_the_diff() {
+    let temp = repo();
+    commit(temp.path(), "a.txt", "one\n");
+    std::fs::write(temp.path().join("new.txt"), "fresh\n").unwrap();
+
+    let stat = git::diff_stat(temp.path()).await.unwrap();
+
+    assert_eq!(stat.files, 1);
+    assert_eq!(stat.paths, ["new.txt"]);
+}
+
+#[tokio::test]
+async fn committing_stages_everything_and_returns_the_new_head() {
+    let temp = repo();
+    commit(temp.path(), "a.txt", "one\n");
+    std::fs::write(temp.path().join("a.txt"), "changed\n").unwrap();
+    std::fs::write(temp.path().join("new.txt"), "fresh\n").unwrap();
+
+    let sha = git::commit_all(temp.path(), "Fix the flaky test")
+        .await
+        .unwrap();
+
+    assert_eq!(sha.len(), 40, "{sha}");
+    assert!(git::diff_stat(temp.path()).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn committing_nothing_is_refused_rather_than_recorded() {
+    let temp = repo();
+    commit(temp.path(), "a.txt", "one\n");
+
+    // An empty commit is not what anyone pressing "commit" meant.
+    assert!(matches!(
+        git::commit_all(temp.path(), "nothing to see").await,
+        Err(GitError::Failed { .. })
+    ));
+}
+
+#[tokio::test]
+async fn a_commit_needs_a_message() {
+    let temp = repo();
+    std::fs::write(temp.path().join("a.txt"), "one\n").unwrap();
+
+    assert!(matches!(
+        git::commit_all(temp.path(), "   ").await,
+        Err(GitError::Failed { .. })
+    ));
+}
+
+#[tokio::test]
+async fn a_message_that_looks_like_an_option_is_still_a_message() {
+    let temp = repo();
+    commit(temp.path(), "a.txt", "one\n");
+    std::fs::write(temp.path().join("a.txt"), "changed\n").unwrap();
+
+    let before = harness::git(temp.path(), &["rev-list", "--count", "HEAD"])
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+
+    git::commit_all(temp.path(), "--amend all the things")
+        .await
+        .unwrap();
+
+    let log = harness::git(temp.path(), &["log", "-1", "--pretty=%s"]);
+    assert_eq!(log.trim(), "--amend all the things");
+
+    // And it added a commit rather than rewriting the one before it.
+    let after = harness::git(temp.path(), &["rev-list", "--count", "HEAD"])
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+    assert_eq!(after, before + 1);
+}

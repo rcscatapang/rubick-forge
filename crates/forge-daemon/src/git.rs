@@ -266,6 +266,106 @@ fn require(output: &Output, tree: &Path) -> Result<(), GitError> {
     })
 }
 
+/// What committing everything in a worktree would commit.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+pub struct DiffStat {
+    pub files: u32,
+    pub insertions: u32,
+    pub deletions: u32,
+    /// The paths, so a dialog can show what is about to be committed.
+    pub paths: Vec<String>,
+}
+
+impl DiffStat {
+    pub fn is_empty(&self) -> bool {
+        self.files == 0
+    }
+}
+
+/// What is uncommitted in a worktree, staged or not.
+///
+/// `--porcelain` is the stable format; the human one is not promised to stay
+/// the same between git versions.
+pub async fn diff_stat(tree: &Path) -> Result<DiffStat, GitError> {
+    let status = run(tree, &["status", "--porcelain=v1", "--untracked-files=all"]).await?;
+    if !status.success() {
+        return Err(failed("status", &status));
+    }
+
+    let paths: Vec<String> = status
+        .stdout
+        .lines()
+        .filter_map(|line| line.get(3..).map(str::trim).filter(|path| !path.is_empty()))
+        .map(str::to_owned)
+        .collect();
+
+    if paths.is_empty() {
+        return Ok(DiffStat::default());
+    }
+
+    // Line counts come from the diff against HEAD; untracked files are not in
+    // it, which is why the file list comes from status instead.
+    let numstat = run(tree, &["diff", "HEAD", "--numstat"]).await?;
+    let (mut insertions, mut deletions) = (0, 0);
+
+    if numstat.success() {
+        for line in numstat.stdout.lines() {
+            let mut columns = line.split_whitespace();
+            insertions += columns
+                .next()
+                .and_then(|n| n.parse::<u32>().ok())
+                .unwrap_or(0);
+            deletions += columns
+                .next()
+                .and_then(|n| n.parse::<u32>().ok())
+                .unwrap_or(0);
+        }
+    }
+
+    Ok(DiffStat {
+        files: paths.len() as u32,
+        insertions,
+        deletions,
+        paths,
+    })
+}
+
+/// Stage everything and commit it.
+///
+/// Never amends and never rebases: this only ever adds a commit. A worktree
+/// with nothing in it is a refusal, because an empty commit is not what anyone
+/// pressing "commit" meant.
+pub async fn commit_all(tree: &Path, message: &str) -> Result<String, GitError> {
+    if message.trim().is_empty() {
+        return Err(GitError::Failed {
+            command: "commit".to_owned(),
+            detail: "a commit needs a message".to_owned(),
+        });
+    }
+
+    let staged = run(tree, &["add", "--all"]).await?;
+    if !staged.success() {
+        return Err(failed("add", &staged));
+    }
+
+    // `--` and the message as its own argv entry: a message beginning with a
+    // dash is a message, not an option.
+    let committed = run(tree, &["commit", "--message", message]).await?;
+    if !committed.success() {
+        return Err(failed("commit", &committed));
+    }
+
+    let head = run(tree, &["rev-parse", "HEAD"]).await?;
+    Ok(head.stdout.trim().to_owned())
+}
+
+fn failed(command: &str, output: &Output) -> GitError {
+    GitError::Failed {
+        command: command.to_owned(),
+        detail: output.first_error_line().to_owned(),
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
     #[error("`git` was not found on PATH; install it or fix the daemon's PATH")]
