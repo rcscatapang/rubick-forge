@@ -27,6 +27,45 @@ pub enum TailscaleBind {
     Address(IpAddr),
 }
 
+/// One other Mac this daemon can speak for.
+///
+/// Only the always-on daemon hosting the bot has these (SPEC D21, the "lite
+/// hub"). They are a copy of what the app already holds, not a registry the
+/// machines know about: still no daemon-to-daemon traffic except the bot
+/// reading their APIs the same way the app does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineEntry {
+    /// What the bot calls it in a reply.
+    pub name: String,
+    /// Base URL, e.g. `http://100.101.102.103:8787`.
+    pub url: String,
+    /// The keychain account holding its bearer token. Never the token itself.
+    pub token_ref: String,
+}
+
+/// The Telegram bot, which is off unless configured (SPEC D21-D22).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TelegramConfig {
+    pub enabled: bool,
+    /// Telegram user ids allowed to talk to the bot. Empty refuses to start:
+    /// a bot anyone can drive is worse than no bot.
+    pub allowed_user_ids: Vec<i64>,
+    /// The keychain account holding the BotFather token.
+    pub token_ref: String,
+}
+
+impl Default for TelegramConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allowed_user_ids: Vec::new(),
+            token_ref: "telegram-bot".to_owned(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -49,6 +88,15 @@ pub struct Config {
     pub stop_grace_secs: u64,
     /// How often live sessions are checked against reality.
     pub poll_secs: u64,
+    /// Other Macs this daemon answers for, when it hosts the bot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub machines: Vec<MachineEntry>,
+    #[serde(default, skip_serializing_if = "is_default_telegram")]
+    pub telegram: TelegramConfig,
+}
+
+fn is_default_telegram(telegram: &TelegramConfig) -> bool {
+    telegram == &TelegramConfig::default()
 }
 
 impl Default for Config {
@@ -62,6 +110,8 @@ impl Default for Config {
             stop_keys: vec![DEFAULT_STOP_KEY.to_owned()],
             stop_grace_secs: 3,
             poll_secs: 2,
+            machines: Vec::new(),
+            telegram: TelegramConfig::default(),
         }
     }
 }
@@ -161,6 +211,9 @@ impl Config {
         if self.poll_secs == 0 {
             return Err(ConfigError::ZeroPoll);
         }
+        if self.telegram.enabled && self.telegram.allowed_user_ids.is_empty() {
+            return Err(ConfigError::UnguardedBot);
+        }
         Ok(())
     }
 }
@@ -208,6 +261,11 @@ pub enum ConfigError {
     ZeroPort,
     #[error("poll_secs = 0 would spin instead of polling")]
     ZeroPoll,
+    #[error(
+        "telegram.enabled is set with no telegram.allowed_user_ids, which would let \
+         anyone who finds the bot drive your agents"
+    )]
+    UnguardedBot,
 }
 
 #[cfg(test)]

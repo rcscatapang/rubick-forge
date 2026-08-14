@@ -61,6 +61,22 @@ pub trait AgentAdapter: Send + Sync {
         command
     }
 
+    /// The keys that answer a permission prompt yes, or no.
+    ///
+    /// tmux key names, sent as keys rather than pasted: these are answers to a
+    /// dialog, not text for a prompt, and both CLIs read them as keystrokes.
+    ///
+    /// The default suits a numbered list with the safe option first, which is
+    /// what both built-ins draw. An adapter whose dialog works differently
+    /// overrides it.
+    fn answer_keys(&self, approve: bool) -> &'static [&'static str] {
+        if approve {
+            &["1", "Enter"]
+        } else {
+            &["Escape"]
+        }
+    }
+
     /// Whether the CLI is on `PATH` and answers.
     ///
     /// Boxed so the trait stays usable behind `dyn`: the registry hands out

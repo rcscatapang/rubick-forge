@@ -20,6 +20,7 @@ pub mod sessions;
 pub mod slug;
 pub mod store;
 pub mod tailnet;
+pub mod telegram;
 pub mod terminal;
 pub mod token;
 pub mod worktree;
