@@ -303,8 +303,14 @@ pub async fn diff_stat(tree: &Path) -> Result<DiffStat, GitError> {
         return Ok(DiffStat::default());
     }
 
-    // Line counts come from the diff against HEAD; untracked files are not in
-    // it, which is why the file list comes from status instead.
+    // `--intent-to-add` puts untracked files into the diff as additions without
+    // staging their contents. Without it a worktree of brand-new files reports
+    // "5 files, +0 −0" — precisely the number the caller asked for.
+    let marked = run(tree, &["add", "--intent-to-add", "--all"]).await?;
+    if !marked.success() {
+        return Err(failed("add --intent-to-add", &marked));
+    }
+
     let numstat = run(tree, &["diff", "HEAD", "--numstat"]).await?;
     let (mut insertions, mut deletions) = (0, 0);
 
@@ -348,8 +354,8 @@ pub async fn commit_all(tree: &Path, message: &str) -> Result<String, GitError> 
         return Err(failed("add", &staged));
     }
 
-    // `--` and the message as its own argv entry: a message beginning with a
-    // dash is a message, not an option.
+    // `--message` takes the next argv entry whole, so a message beginning with
+    // a dash is a message rather than an option.
     let committed = run(tree, &["commit", "--message", message]).await?;
     if !committed.success() {
         return Err(failed("commit", &committed));

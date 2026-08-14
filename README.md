@@ -75,7 +75,9 @@ launchd commands; [docs/runtime.md](docs/runtime.md) the tmux session model and
 recovery; [docs/adapters.md](docs/adapters.md) how each agent CLI is launched
 and read; [docs/app.md](docs/app.md) what the desktop app does and does not
 hold; [docs/api.md](docs/api.md) the HTTP/WS surface;
-[docs/remote.md](docs/remote.md) the tailnet bind and adding a second Mac.
+[docs/remote.md](docs/remote.md) the tailnet bind and adding a second Mac;
+[docs/telegram.md](docs/telegram.md) the bot; [docs/github.md](docs/github.md)
+pull requests and CI status.
 
 ## Security posture
 

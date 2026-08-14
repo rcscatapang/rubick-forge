@@ -68,9 +68,13 @@ impl Daemon {
         }
     }
 
-    /// Start the Telegram bot, if this is the Mac that hosts it.
+    /// Start the Telegram bot and the GitHub poller, if either is configured.
     pub fn attend(&self) {
         crate::telegram::spawn(self.state.clone());
+
+        // Always started: it reads the token itself, so one saved later begins
+        // polling without a restart, and a revoked one stops.
+        tokio::spawn(crate::github::poll::watch(self.state.clone()));
     }
 
     /// Watch live sessions until the daemon shuts down.

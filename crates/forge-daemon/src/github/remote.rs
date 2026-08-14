@@ -109,15 +109,63 @@ pub async fn push(tree: &Path, branch: &str) -> Result<(), git::GitError> {
         return Ok(());
     }
 
+    // git echoes the remote URL in push errors, and a remote can carry a token
+    // (`https://ghp_…@github.com/o/n`). Its complaint is scrubbed before it
+    // reaches an HTTP body or a log line.
     Err(git::GitError::Failed {
         command: format!("push origin {branch}"),
-        detail: output.first_error_line().to_owned(),
+        detail: redact(output.first_error_line()),
     })
+}
+
+/// Replace userinfo in any URL in `message` with an ellipsis.
+fn redact(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+
+    for word in message.split_inclusive(char::is_whitespace) {
+        match word.split_once("://") {
+            // `scheme://userinfo@host/…` — the userinfo is the secret half.
+            Some((scheme, rest)) if rest.contains('@') => {
+                let (_, host) = rest.split_once('@').expect("just checked for one");
+                out.push_str(scheme);
+                out.push_str("://…@");
+                out.push_str(host);
+            }
+            _ => out.push_str(word),
+        }
+    }
+
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_token_in_a_remote_url_does_not_survive_an_error_message() {
+        let complaint = "fatal: unable to access \
+                         'https://ghp_secret@github.com/o/n.git/': 403";
+
+        let cleaned = redact(complaint);
+
+        assert!(!cleaned.contains("ghp_secret"), "{cleaned}");
+        assert!(cleaned.contains("github.com/o/n.git"), "{cleaned}");
+    }
+
+    #[test]
+    fn an_error_with_no_url_in_it_is_left_alone() {
+        let complaint = "! [rejected] main -> main (non-fast-forward)";
+
+        assert_eq!(redact(complaint), complaint);
+    }
+
+    #[test]
+    fn an_ordinary_remote_url_keeps_its_shape() {
+        let complaint = "remote: https://github.com/o/n/pull/new/forge/x";
+
+        assert_eq!(redact(complaint), complaint);
+    }
 
     fn repo(owner: &str, name: &str) -> Option<Repo> {
         Some(Repo {

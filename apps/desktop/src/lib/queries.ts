@@ -31,6 +31,11 @@ export function keysFor(machine: string) {
     session: (id: number) => [...all, "sessions", id] as const,
     events: () => [...all, "events"] as const,
     settings: () => [...all, "settings"] as const,
+    github: () => [...all, "github"] as const,
+    githubLinks: () => [...all, "github", "links"] as const,
+    projectRepo: (id: number) => [...all, "projects", id, "github"] as const,
+    projectIssues: (id: number) => [...all, "projects", id, "github", "issues"] as const,
+    taskDiff: (id: number) => [...all, "tasks", id, "github", "diff"] as const,
   };
 }
 
@@ -156,10 +161,102 @@ export function invalidateFor(
 
   void queries.invalidateQueries({ queryKey: keys.tasks(), exact: true });
 
+  // Anything GitHub says changes the chip on a task row.
+  if (kind.startsWith("pr_") || kind.startsWith("checks_")) {
+    void queries.invalidateQueries({ queryKey: keys.githubLinks() });
+  }
+
   // A task's git facts and session list both hang off its id.
   if (taskId != null) {
     void queries.invalidateQueries({ queryKey: [...keys.all, "tasks", taskId] });
   }
+}
+
+export function useGitHub() {
+  const api = useClient();
+  const keys = useKeys();
+  return useQuery({ queryKey: keys.github(), queryFn: () => api.github() });
+}
+
+/**
+ * Every task's GitHub link, in one query.
+ *
+ * One request for the whole dashboard rather than one per task: most tasks
+ * have no link at all, and a per-task query would be a request each to learn
+ * that.
+ */
+export function useGitHubLinks() {
+  const api = useClient();
+  const keys = useKeys();
+  return useQuery({ queryKey: keys.githubLinks(), queryFn: () => api.githubLinks() });
+}
+
+/** Which GitHub repository a project is, or `null` for one that is not. */
+export function useProjectRepo(id: number) {
+  const api = useClient();
+  const keys = useKeys();
+  return useQuery({ queryKey: keys.projectRepo(id), queryFn: () => api.projectRepo(id) });
+}
+
+/** Open issues, asked for only when someone opens the browser. */
+export function useProjectIssues(id: number, enabled: boolean) {
+  const api = useClient();
+  const keys = useKeys();
+  return useQuery({
+    queryKey: keys.projectIssues(id),
+    queryFn: () => api.projectIssues(id),
+    enabled,
+  });
+}
+
+/** What committing a task would commit, asked for when the dialog opens. */
+export function useTaskDiff(id: number, enabled: boolean) {
+  const api = useClient();
+  const keys = useKeys();
+  return useQuery({
+    queryKey: keys.taskDiff(id),
+    queryFn: () => api.taskDiff(id),
+    enabled,
+  });
+}
+
+export function useGitHubActions() {
+  const api = useClient();
+  const queries = useQueryClient();
+  const keys = useKeys();
+
+  const refresh = () => {
+    void queries.invalidateQueries({ queryKey: keys.githubLinks() });
+    void queries.invalidateQueries({ queryKey: keys.tasks() });
+    void queries.invalidateQueries({ queryKey: keys.events() });
+  };
+
+  return {
+    saveToken: useMutation({
+      mutationFn: (token: string) => api.setGitHubToken(token),
+      onSuccess: () => void queries.invalidateQueries({ queryKey: keys.github() }),
+    }),
+    forgetToken: useMutation({
+      mutationFn: () => api.forgetGitHubToken(),
+      onSuccess: () => void queries.invalidateQueries({ queryKey: keys.github() }),
+    }),
+    commit: useMutation({
+      mutationFn: ({ id, message }: { id: number; message?: string }) =>
+        api.commitTask(id, { message }),
+      onSuccess: (_, { id }) => {
+        void queries.invalidateQueries({ queryKey: keys.taskDiff(id) });
+        refresh();
+      },
+    }),
+    openPull: useMutation({
+      mutationFn: (id: number) => api.openPull(id),
+      onSuccess: refresh,
+    }),
+    fromIssue: useMutation({
+      mutationFn: (body: { project_id: number; number: number }) => api.taskFromIssue(body),
+      onSuccess: refresh,
+    }),
+  };
 }
 
 /** The actions the dashboard offers, each refreshing what it changed. */

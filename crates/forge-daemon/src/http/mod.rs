@@ -5,6 +5,7 @@ pub mod auth;
 pub mod error;
 mod events;
 pub(crate) mod extract;
+mod github;
 mod health;
 mod projects;
 mod settings;
@@ -25,6 +26,14 @@ use crate::store::Store;
 use crate::token::Token;
 use error::ApiError;
 use health::BinaryCache;
+
+/// The GitHub client built from the stored token, if there is one.
+///
+/// Re-exported so the poller can hold a long-lived one — which is where the
+/// ETag cache that makes polling affordable lives.
+pub fn github_client() -> Option<crate::github::api::GitHub> {
+    github::stored_client()
+}
 
 /// tmux is the only runtime, so the app state names it concretely; the
 /// manager itself is written against the trait.
@@ -97,6 +106,27 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/tasks/{id}/instruction",
             axum::routing::post(tasks::instruction),
+        )
+        .route("/github", get(github::status))
+        .route(
+            "/github/token",
+            axum::routing::put(github::set_token).delete(github::forget_token),
+        )
+        .route("/github/links", get(github::links))
+        .route(
+            "/github/tasks",
+            axum::routing::post(github::task_from_issue),
+        )
+        .route("/projects/{id}/github", get(github::project_repo))
+        .route("/projects/{id}/github/issues", get(github::project_issues))
+        .route("/tasks/{id}/github/diff", get(github::task_diff))
+        .route(
+            "/tasks/{id}/github/commit",
+            axum::routing::post(github::commit),
+        )
+        .route(
+            "/tasks/{id}/github/pull",
+            axum::routing::post(github::open_pull),
         )
         .route("/tasks/{id}/answer", axum::routing::post(tasks::answer))
         .route("/tasks/{id}/pane", get(tasks::pane))

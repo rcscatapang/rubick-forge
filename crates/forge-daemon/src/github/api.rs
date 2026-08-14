@@ -231,7 +231,12 @@ impl GitHub {
         Ok(scopes)
     }
 
-    /// Open pull requests whose head branch is `branch`.
+    /// The pull request for `branch`, in whatever state it is now.
+    ///
+    /// `state=all` on purpose: a merged or closed one is exactly what the
+    /// poller needs to see in order to notice that it merged or closed.
+    ///
+    /// `Ok(None)` means GitHub said nothing has changed since the last ask.
     pub async fn pull_for_branch(
         &self,
         repo: &Repo,
@@ -286,31 +291,74 @@ impl GitHub {
 
     /// Open issues, newest first, excluding pull requests.
     pub async fn issues(&self, repo: &Repo) -> Result<Vec<Issue>, GitHubError> {
-        let path = format!("repos/{}/issues?state=open&per_page=50", repo.slug());
+        let issues: Vec<Issue> = self
+            .fresh(&format!(
+                "repos/{}/issues?state=open&per_page=50",
+                repo.slug()
+            ))
+            .await?;
 
-        match self.conditional::<Vec<Issue>>(&path).await? {
-            Conditional::Unchanged => Ok(Vec::new()),
-            Conditional::Fresh(issues) => Ok(issues
-                .into_iter()
-                .filter(|i| !i.is_pull_request())
-                .collect()),
-        }
+        Ok(issues
+            .into_iter()
+            .filter(|issue| !issue.is_pull_request())
+            .collect())
     }
 
-    /// The rolled-up check state for a commit.
-    pub async fn checks(&self, repo: &Repo, sha: &str) -> Result<Checks, GitHubError> {
+    /// One issue by number.
+    ///
+    /// Asked for directly rather than found in the list: the list is one page,
+    /// and a repository's fifty-first open issue is still an issue.
+    pub async fn issue(&self, repo: &Repo, number: i64) -> Result<Issue, GitHubError> {
+        let issue: Issue = self
+            .fresh(&format!("repos/{}/issues/{number}", repo.slug()))
+            .await?;
+
+        // GitHub serves pull requests from the issues endpoint too.
+        if issue.is_pull_request() {
+            return Err(GitHubError::NotFound);
+        }
+
+        Ok(issue)
+    }
+
+    /// The rolled-up check state for a commit, or `None` if it has not changed.
+    ///
+    /// "Unchanged" and "no checks" are deliberately different answers. Folding
+    /// a 304 into `Checks::None` would overwrite a stored pass or failure, and
+    /// the next poll would read it back as fresh and announce it again.
+    pub async fn checks(&self, repo: &Repo, sha: &str) -> Result<Option<Checks>, GitHubError> {
         let path = format!("repos/{}/commits/{sha}/check-runs", repo.slug());
 
         match self.conditional::<CheckRuns>(&path).await? {
-            Conditional::Unchanged => Ok(Checks::None),
-            Conditional::Fresh(body) => Ok(roll_up(
+            Conditional::Unchanged => Ok(None),
+            Conditional::Fresh(body) => Ok(Some(roll_up(
                 &body
                     .check_runs
                     .into_iter()
                     .map(|run| (run.status, run.conclusion))
                     .collect::<Vec<_>>(),
-            )),
+            ))),
         }
+    }
+
+    /// A GET that always fetches, for a caller that needs a body every time.
+    async fn fresh<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T, GitHubError> {
+        let response = self
+            .request(reqwest::Method::GET, path)
+            .send()
+            .await
+            .map_err(|err| GitHubError::Transport(err.to_string()))?;
+
+        self.record_rate(&response);
+
+        if !response.status().is_success() {
+            return Err(self.classify(response).await);
+        }
+
+        response
+            .json()
+            .await
+            .map_err(|err| GitHubError::Transport(err.to_string()))
     }
 
     /// A GET that sends the last ETag, so an unchanged answer is free.

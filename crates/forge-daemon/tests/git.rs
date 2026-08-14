@@ -219,14 +219,32 @@ async fn a_diffstat_counts_what_would_be_committed() {
 }
 
 #[tokio::test]
-async fn an_untracked_file_counts_even_though_it_is_not_in_the_diff() {
+async fn an_untracked_file_counts_its_lines_as_well_as_itself() {
     let temp = repo();
     commit(temp.path(), "a.txt", "one\n");
-    std::fs::write(temp.path().join("new.txt"), "fresh\n").unwrap();
+    std::fs::write(temp.path().join("new.txt"), "fresh\nlines\n").unwrap();
 
     let stat = git::diff_stat(temp.path()).await.unwrap();
 
     assert_eq!(stat.files, 1);
+    assert_eq!(stat.paths, ["new.txt"]);
+    // Without intent-to-add this reads "+0", which is the number the dialog
+    // exists to show.
+    assert_eq!(stat.insertions, 2);
+}
+
+#[tokio::test]
+async fn asking_what_would_be_committed_does_not_commit_anything() {
+    let temp = repo();
+    commit(temp.path(), "a.txt", "one\n");
+    std::fs::write(temp.path().join("new.txt"), "fresh\n").unwrap();
+    let before = harness::git(temp.path(), &["rev-parse", "HEAD"]);
+
+    git::diff_stat(temp.path()).await.unwrap();
+
+    assert_eq!(harness::git(temp.path(), &["rev-parse", "HEAD"]), before);
+    // And the file is still untracked as far as its contents go.
+    let stat = git::diff_stat(temp.path()).await.unwrap();
     assert_eq!(stat.paths, ["new.txt"]);
 }
 

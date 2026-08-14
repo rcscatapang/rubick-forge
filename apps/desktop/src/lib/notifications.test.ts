@@ -199,6 +199,67 @@ describe("not restacking", () => {
   });
 });
 
+describe("what GitHub is worth interrupting for", () => {
+  it("announces a failed check with the pull request it failed on", () => {
+    const failed: EventRecord = {
+      id: 7,
+      ts: "2026-08-14T10:00:00Z",
+      kind: "checks_failed",
+      task_id: 7,
+      number: 41,
+      url: "https://github.com/o/n/pull/41",
+    };
+
+    const notification = notificationFor(failed, context);
+
+    expect(notification?.body).toBe("Checks failed on PR #41.");
+    expect(notification?.title).toBe("Add adapters \u2014 forge");
+  });
+
+  it("announces a merge, which is the end of the job", () => {
+    const merged: EventRecord = {
+      id: 8,
+      ts: "2026-08-14T10:00:00Z",
+      kind: "pr_merged",
+      task_id: 7,
+      number: 41,
+      url: "https://github.com/o/n/pull/41",
+    };
+
+    expect(notificationFor(merged, context)?.body).toBe("PR #41 was merged.");
+  });
+
+  it("says nothing about a pull request opening, which you just did", () => {
+    const opened: EventRecord = {
+      id: 9,
+      ts: "2026-08-14T10:00:00Z",
+      kind: "pr_opened",
+      task_id: 7,
+      number: 41,
+      url: "https://github.com/o/n/pull/41",
+    };
+    const passed: EventRecord = { ...opened, id: 10, kind: "checks_passed" };
+
+    expect(notificationFor(opened, context)).toBeNull();
+    expect(notificationFor(passed, context)).toBeNull();
+  });
+
+  it("respects a GitHub kind turned off without touching the agent ones", () => {
+    const prefs = { ...DEFAULT_PREFS, checks_failed: false };
+    const failed: EventRecord = {
+      id: 11,
+      ts: "2026-08-14T10:00:00Z",
+      kind: "checks_failed",
+      task_id: 7,
+      number: 41,
+      url: "https://github.com/o/n/pull/41",
+    };
+
+    expect(notificationFor(failed, { ...context, prefs })).toBeNull();
+    expect(notificationFor(waiting("Allow?"), { ...context, prefs })).not.toBeNull();
+  });
+});
+
 describe("preferences", () => {
   it("are all on to begin with", () => {
     expect(Object.values(DEFAULT_PREFS).every(Boolean)).toBe(true);

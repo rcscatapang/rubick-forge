@@ -1,7 +1,13 @@
 import type { EventRecord, Project, Task } from "@/lib/api-types";
 
 /** The three kinds worth interrupting someone for. */
-export const NOTIFIED_KINDS = ["agent_waiting", "task_finished", "agent_error"] as const;
+export const NOTIFIED_KINDS = [
+  "agent_waiting",
+  "task_finished",
+  "agent_error",
+  "checks_failed",
+  "pr_merged",
+] as const;
 export type NotifiedKind = (typeof NOTIFIED_KINDS)[number];
 
 /** Whether each kind is on. Settings live in the daemon so future clients share them. */
@@ -11,6 +17,8 @@ export const DEFAULT_PREFS: NotificationPrefs = {
   agent_waiting: true,
   task_finished: true,
   agent_error: true,
+  checks_failed: true,
+  pr_merged: true,
 };
 
 /** The daemon settings key for one kind. */
@@ -80,9 +88,9 @@ function name(taskId: number, { tasks, projects }: Context): string {
 /**
  * What, if anything, to show a person about this event.
  *
- * Returns `null` for everything that is not one of the three signal kinds, for
- * a kind the user turned off, and for the task they are already looking at in
- * a focused window - telling someone what is on their screen is noise.
+ * Returns `null` for everything that is not a signal kind, for a kind the user
+ * turned off, and for the task they are already looking at in a focused window
+ * - telling someone what is on their screen is noise.
  */
 export function notificationFor(
   event: EventRecord,
@@ -113,6 +121,15 @@ export function notificationFor(
       };
     case "task_finished":
       return { kind: event.kind, taskId, title, body: "Finished." };
+    case "checks_failed":
+      return {
+        kind: event.kind,
+        taskId,
+        title,
+        body: `Checks failed on PR #${event.number}.`,
+      };
+    case "pr_merged":
+      return { kind: event.kind, taskId, title, body: `PR #${event.number} was merged.` };
   }
 }
 

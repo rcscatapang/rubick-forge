@@ -6,7 +6,10 @@ use rusqlite::Connection;
 
 /// Each entry is one migration; its index + 1 is the schema version it
 /// produces.
-const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_initial.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/0001_initial.sql"),
+    include_str!("migrations/0002_github.sql"),
+];
 
 /// The version a fully migrated database reports.
 pub fn latest_version() -> i64 {
@@ -68,7 +71,14 @@ mod tests {
         assert_eq!(run(&conn).unwrap(), latest_version());
         assert_eq!(
             tables(&conn),
-            ["events", "projects", "sessions", "settings", "tasks"]
+            [
+                "events",
+                "projects",
+                "sessions",
+                "settings",
+                "task_github",
+                "tasks"
+            ]
         );
     }
 

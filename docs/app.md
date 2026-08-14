@@ -70,14 +70,19 @@ the affected part of the screen refetches.
 Each machine renders its own section from its own daemon, so one Mac being
 asleep shows as unreachable on that section and changes nothing else.
 
-No test or build status. That arrives with the GitHub integration.
+Test and build status arrives from GitHub, on the tasks that have a pull
+request — see [github.md](github.md).
 
 ## Notifications
 
-Three things get a native notification: an agent is **waiting** for you, a task
-**finished**, an agent **errored**. Nothing else — a dashboard you have to
-watch is one you stop watching, and a stream of notifications is one you turn
-off.
+Five things get a native notification: an agent is **waiting** for you, a task
+**finished**, an agent **errored**, **CI failed** on a pull request, or a pull
+request was **merged**. Nothing else — a dashboard you have to watch is one you
+stop watching, and a stream of notifications is one you turn off.
+
+Every one of them is the end of something you were waiting on, and happens
+while you are looking elsewhere. A pull request *opening* is not on the list,
+because you just did it.
 
 Each kind has a toggle, and the toggles live in the daemon's settings rather
 than in the app, so a second Mac — or the Telegram bot, later — shares the same
