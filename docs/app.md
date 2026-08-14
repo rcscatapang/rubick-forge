@@ -81,6 +81,10 @@ answer.
   the same kind for the same task.
 - If macOS refuses permission, the app says so in the settings section and
   carries on: the dashboard shows the same states either way.
+- Clicking one brings the app forward but does not open the task. Tauri's
+  notification plugin only delivers clicks on mobile, so there is nothing for
+  the app to act on; the notification names the task and its project, and
+  anything waiting is already at the top of the dashboard.
 
 Notifications need this app to be open. Away from your Mac, the answer is the
 Telegram bot, which lives in the daemon and does not depend on any app being
