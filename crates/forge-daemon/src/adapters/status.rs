@@ -195,22 +195,24 @@ mod tests {
     use super::*;
     use crate::adapters::markers::MarkerSet;
 
-    const PATTERNS: StatusPatterns = StatusPatterns {
-        sets: &[
-            MarkerSet {
-                status: AgentStatus::Waiting,
-                markers: &["ASKING"],
-            },
-            MarkerSet {
-                status: AgentStatus::Working,
-                markers: &["BUSY"],
-            },
-            MarkerSet {
-                status: AgentStatus::Idle,
-                markers: &["PROMPT"],
-            },
-        ],
-    };
+    fn patterns() -> StatusPatterns {
+        StatusPatterns {
+            sets: vec![
+                MarkerSet {
+                    status: AgentStatus::Waiting,
+                    markers: vec!["ASKING".into()],
+                },
+                MarkerSet {
+                    status: AgentStatus::Working,
+                    markers: vec!["BUSY".into()],
+                },
+                MarkerSet {
+                    status: AgentStatus::Idle,
+                    markers: vec!["PROMPT".into()],
+                },
+            ],
+        }
+    }
 
     fn alive() -> PaneState {
         PaneState {
@@ -229,7 +231,7 @@ mod tests {
     }
 
     fn poll(tracker: &mut Tracker, screen: &str) -> Outcome {
-        tracker.poll(&alive(), Some(screen), &PATTERNS)
+        tracker.poll(&alive(), Some(screen), &patterns())
     }
 
     #[test]
@@ -352,15 +354,15 @@ mod tests {
 
     #[test]
     fn an_error_read_off_the_screen_does_not_end_the_session() {
-        const WITH_ERROR: StatusPatterns = StatusPatterns {
-            sets: &[MarkerSet {
+        let with_error = StatusPatterns {
+            sets: vec![MarkerSet {
                 status: AgentStatus::Error,
-                markers: &["API Error"],
+                markers: vec!["API Error".into()],
             }],
         };
         let mut tracker = Tracker::new(AgentStatus::Working);
 
-        let outcome = tracker.poll(&alive(), Some("API Error: overloaded"), &WITH_ERROR);
+        let outcome = tracker.poll(&alive(), Some("API Error: overloaded"), &with_error);
 
         assert_eq!(outcome.status, AgentStatus::Error);
         assert!(
@@ -375,7 +377,11 @@ mod tests {
         assert!(!poll(&mut tracker, "BUSY").process_ended);
 
         let mut tracker = Tracker::new(AgentStatus::Working);
-        assert!(tracker.poll(&dead(Some(0)), None, &PATTERNS).process_ended);
+        assert!(
+            tracker
+                .poll(&dead(Some(0)), None, &patterns())
+                .process_ended
+        );
     }
 
     #[test]
@@ -384,7 +390,7 @@ mod tests {
         // nothing changes status, but the session is over and must be closed.
         let mut tracker = Tracker::new(AgentStatus::Error);
 
-        let outcome = tracker.poll(&dead(Some(1)), None, &PATTERNS);
+        let outcome = tracker.poll(&dead(Some(1)), None, &patterns());
 
         assert!(!outcome.changed());
         assert!(outcome.process_ended);
@@ -438,7 +444,7 @@ mod tests {
         let mut tracker = Tracker::new(AgentStatus::Waiting);
 
         // The confirmation dialog is still on screen, but nobody is asking.
-        let outcome = tracker.poll(&dead(Some(0)), Some("ASKING"), &PATTERNS);
+        let outcome = tracker.poll(&dead(Some(0)), Some("ASKING"), &patterns());
 
         assert_eq!(outcome.status, AgentStatus::Stopped);
         assert_eq!(outcome.changed_from, Some(AgentStatus::Waiting));
@@ -454,7 +460,7 @@ mod tests {
         ] {
             let mut tracker = Tracker::new(AgentStatus::Working);
             assert_eq!(
-                tracker.poll(&dead(code), None, &PATTERNS).status,
+                tracker.poll(&dead(code), None, &patterns()).status,
                 expected,
                 "exit {code:?}"
             );
@@ -465,7 +471,7 @@ mod tests {
     fn a_poll_with_no_capture_is_treated_as_nothing_recognised() {
         let mut tracker = Tracker::new(AgentStatus::Working);
 
-        let outcome = tracker.poll(&alive(), None, &PATTERNS);
+        let outcome = tracker.poll(&alive(), None, &patterns());
 
         assert_eq!(outcome.status, AgentStatus::Working);
         assert!(!outcome.changed());

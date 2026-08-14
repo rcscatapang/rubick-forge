@@ -55,6 +55,13 @@ pub async fn health(State(state): State<AppState>) -> Json<Health> {
         uptime_secs: state.started_at.elapsed().as_secs(),
         machine: state.machine.to_string(),
         binaries: state.binaries.get().await,
+        adapter_errors: crate::adapters::load_errors()
+            .into_iter()
+            .map(|error| forge_core::AdapterLoadError {
+                source: error.source,
+                detail: error.detail,
+            })
+            .collect(),
     })
 }
 

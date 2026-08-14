@@ -14,15 +14,16 @@ export const AGENT_STATUSES: readonly AgentStatus[] = [
   "stopped",
 ] as const;
 
-/** Mirrors `forge_core::AdapterId`. */
-export type AdapterId = "claude-code" | "codex";
+/**
+ * Mirrors `forge_core::AdapterId`.
+ *
+ * Open, not a union: adapters are declared by TOML manifests on the daemon, so
+ * the app learns what exists from `GET /adapters` rather than from this file.
+ */
+export type AdapterId = string;
 
-export const ADAPTER_IDS: readonly AdapterId[] = ["claude-code", "codex"] as const;
-
-export const ADAPTER_LABELS: Record<AdapterId, string> = {
-  "claude-code": "Claude Code",
-  codex: "Codex",
-};
+/** The two Forge ships with, for a sensible default before adapters load. */
+export const DEFAULT_ADAPTER: AdapterId = "claude-code";
 
 export const AGENT_STATUS_LABELS: Record<AgentStatus, string> = {
   idle: "Idle",
@@ -130,9 +131,24 @@ export interface AdapterInfo {
   settings: SettingDef[];
 }
 
+/** One adapter manifest that would not load. */
+export interface AdapterLoadError {
+  /** The file it came from, or `built-in`. */
+  source: string;
+  detail: string;
+}
+
 /** The body of `GET /adapters`. */
 export interface AdapterList {
   adapters: AdapterInfo[];
+  /** Manifests that would not load; an adapter missing above has a reason. */
+  errors: AdapterLoadError[];
+}
+
+/** The body of `POST /adapters/reload`. */
+export interface ReloadResult {
+  loaded: number;
+  errors: AdapterLoadError[];
 }
 
 /** The body of `GET /settings` and `PATCH /settings`. */
@@ -275,6 +291,8 @@ export interface Health {
   uptime_secs: number;
   machine: string;
   binaries: BinaryStatus[];
+  /** Adapter manifests that would not load. A warning, never a failure. */
+  adapter_errors: AdapterLoadError[];
 }
 
 /** Mirrors `Health::is_healthy`. */

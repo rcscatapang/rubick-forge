@@ -1,116 +1,186 @@
 //! Agent adapters: how the daemon launches each CLI and reads what it is doing.
+//!
+//! There is one adapter engine and no special cases. The two Forge ships with
+//! are TOML manifests compiled into the binary, loaded through exactly the code
+//! path a file in the adapters directory takes — so a third CLI is a file, and
+//! the built-ins prove the format is enough to describe a real one (SPEC D24).
 
-mod claude_code;
-mod codex;
+pub mod manifest;
 pub mod markers;
+pub mod registry;
 pub mod settings;
 pub mod status;
 
 use forge_core::{AdapterId, BinaryStatus, Task};
-use futures_util::future::BoxFuture;
 use serde_json::{Map, Value};
 
-use markers::StatusPatterns;
+use manifest::{Manifest, PromptMode, SettingKind};
+use markers::{MarkerSet, StatusPatterns};
 
-/// What kind of value a setting takes. Only scalars, because settings become
-/// command-line arguments.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SettingKind {
-    Text,
-    Number,
-    Flag,
-}
+pub use registry::{adapter, all, load_errors, reload, LoadError};
 
 /// One setting an adapter understands, for the UI to render and the daemon to
 /// check a project's blob against.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SettingDef {
-    pub key: &'static str,
+    pub key: String,
     pub kind: SettingKind,
-    pub description: &'static str,
+    pub description: String,
 }
 
 /// Everything the daemon needs to know about one agent CLI.
-pub trait AgentAdapter: Send + Sync {
-    fn id(&self) -> AdapterId;
+///
+/// A struct rather than a trait: every adapter is now described by the same
+/// data, so there is nothing left for an implementation to vary.
+#[derive(Debug, Clone)]
+pub struct Adapter {
+    manifest: Manifest,
+    patterns: StatusPatterns,
+}
+
+impl Adapter {
+    pub fn new(manifest: Manifest) -> Self {
+        let patterns = StatusPatterns {
+            sets: manifest
+                .status
+                .iter()
+                .map(|set| MarkerSet {
+                    status: set.status,
+                    markers: set.markers.clone(),
+                })
+                .collect(),
+        };
+
+        Self { manifest, patterns }
+    }
+
+    pub fn id(&self) -> &AdapterId {
+        &self.manifest.id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.manifest.name
+    }
+
+    pub fn binary_name(&self) -> &str {
+        &self.manifest.binary
+    }
 
     /// The ordered markers that turn pane text into a status.
-    fn status_patterns(&self) -> &'static StatusPatterns;
+    pub fn status_patterns(&self) -> &StatusPatterns {
+        &self.patterns
+    }
 
     /// The settings this adapter reads out of a project's blob.
-    fn settings_schema(&self) -> &'static [SettingDef];
+    pub fn settings_schema(&self) -> Vec<SettingDef> {
+        self.manifest
+            .settings
+            .iter()
+            .map(|setting| SettingDef {
+                key: setting.key.clone(),
+                kind: setting.kind,
+                description: setting.description.clone(),
+            })
+            .collect()
+    }
 
-    /// Fragments that mean "this screen is asking permission", as opposed to
-    /// the other reasons an agent sits waiting.
+    /// Whether a pane looks like it is asking permission.
+    pub fn is_permission_prompt(&self, pane: &str) -> bool {
+        let tail = markers::tail_of(pane, markers::TAIL_LINES);
+        self.manifest
+            .permission_markers()
+            .any(|marker| tail.contains(marker))
+    }
+
+    /// The keys that answer a permission prompt yes, or no.
     ///
-    /// A subset of the `waiting` markers on purpose: those are tuned for recall
-    /// so that anything blocking reads as waiting, while these decide whether
-    /// answering yes or no is a sensible thing to offer at all.
-    fn permission_markers(&self) -> &'static [&'static str];
+    /// tmux key names, sent as keys rather than pasted: these answer a dialog
+    /// rather than being text for a prompt.
+    pub fn answer_keys(&self, approve: bool) -> Vec<String> {
+        if approve {
+            self.manifest.answers.approve.clone()
+        } else {
+            self.manifest.answers.deny.clone()
+        }
+    }
 
-    /// Arguments derived from a project's settings for this adapter.
-    fn launch_args(&self, settings: &Map<String, Value>) -> Vec<String>;
+    /// How an instruction reaches this agent.
+    pub fn injection(&self) -> &manifest::Injection {
+        &self.manifest.injection
+    }
+
+    /// Arguments derived from a project's settings.
+    ///
+    /// A value of the wrong type is skipped rather than stringified: turning
+    /// `7` into `"7"` would hand the CLI something the user never wrote.
+    pub fn launch_args(&self, settings: &Map<String, Value>, task: &Task) -> Vec<String> {
+        let mut args = Vec::new();
+
+        for setting in &self.manifest.settings {
+            if setting.args.is_empty() {
+                // Read some other way; `extra_args` is the one built-in case.
+                continue;
+            }
+
+            let Some(value) = settings.get(&setting.key) else {
+                continue;
+            };
+
+            let filled = match (setting.kind, value) {
+                (SettingKind::Text, Value::String(text)) => text.clone(),
+                (SettingKind::Number, Value::Number(number)) => number.to_string(),
+                // A flag contributes its arguments or nothing; there is no
+                // value to substitute.
+                (SettingKind::Flag, Value::Bool(true)) => String::new(),
+                _ => continue,
+            };
+
+            args.extend(
+                setting
+                    .args
+                    .iter()
+                    .map(|template| manifest::fill(template, &filled, task.id, &task.title)),
+            );
+        }
+
+        args.extend(extra_args(settings));
+        args
+    }
 
     /// The full argv for a task's session.
     ///
-    /// The initial prompt goes last and as its own entry, so nothing in it can
-    /// be read as an option or reach a shell.
-    fn launch_command(&self, task: &Task, settings: &Map<String, Value>) -> Vec<String> {
-        let mut command = vec![self.id().binary_name().to_owned()];
-        command.extend(self.launch_args(settings));
+    /// Every element is built separately and nothing is ever joined into a
+    /// shell string, so a title or a prompt containing `;` or `$(…)` is data.
+    pub fn launch_command(&self, task: &Task, settings: &Map<String, Value>) -> Vec<String> {
+        let mut command = vec![self.manifest.binary.clone()];
 
-        if let Some(prompt) = task.initial_prompt.as_deref() {
-            if !prompt.trim().is_empty() {
-                command.push(prompt.to_owned());
+        command.extend(
+            self.manifest
+                .launch_args
+                .iter()
+                .map(|template| manifest::fill(template, "", task.id, &task.title)),
+        );
+        command.extend(self.launch_args(settings, task));
+
+        if self.manifest.prompt == PromptMode::Argument {
+            if let Some(prompt) = task.initial_prompt.as_deref() {
+                if !prompt.trim().is_empty() {
+                    command.push(prompt.to_owned());
+                }
             }
         }
 
         command
     }
 
-    /// The keys that answer a permission prompt yes, or no.
-    ///
-    /// tmux key names, sent as keys rather than pasted: these are answers to a
-    /// dialog, not text for a prompt, and both CLIs read them as keystrokes.
-    ///
-    /// The default suits a numbered list with the safe option first, which is
-    /// what both built-ins draw. An adapter whose dialog works differently
-    /// overrides it.
-    fn answer_keys(&self, approve: bool) -> &'static [&'static str] {
-        if approve {
-            &["1", "Enter"]
-        } else {
-            &["Escape"]
-        }
-    }
-
     /// Whether the CLI is on `PATH` and answers.
-    ///
-    /// Boxed so the trait stays usable behind `dyn`: the registry hands out
-    /// one adapter chosen at runtime, which is the whole point of it.
-    fn binary_check(&self) -> BoxFuture<'static, BinaryStatus> {
-        let name = self.id().binary_name();
-        Box::pin(crate::binaries::probe(name))
+    pub async fn binary_check(&self) -> BinaryStatus {
+        crate::binaries::probe_with(&self.manifest.binary, &self.manifest.version_args).await
     }
-}
-
-/// `--model <value>` and free-form extra arguments, which both CLIs take.
-///
-/// A value of the wrong type is skipped rather than stringified: turning `7`
-/// into `"7"` would hand the CLI something the user never wrote.
-pub(crate) fn common_args(settings: &Map<String, Value>) -> Vec<String> {
-    let mut args = Vec::new();
-
-    if let Some(model) = settings.get("model").and_then(Value::as_str) {
-        args.push("--model".to_owned());
-        args.push(model.to_owned());
-    }
-    args
 }
 
 /// Whatever the user put in `extra_args`, split into argv entries.
-pub(crate) fn extra_args(settings: &Map<String, Value>) -> Vec<String> {
+fn extra_args(settings: &Map<String, Value>) -> Vec<String> {
     settings
         .get("extra_args")
         .and_then(Value::as_str)
@@ -123,25 +193,9 @@ pub(crate) fn extra_args(settings: &Map<String, Value>) -> Vec<String> {
 /// Adapter-agnostic because the caller may not know which one did: an event
 /// arriving from another Mac carries the screen, not the adapter.
 pub fn looks_like_permission_prompt(pane: &str) -> bool {
-    all().any(|adapter| {
-        adapter
-            .permission_markers()
-            .iter()
-            .any(|marker| pane.contains(marker))
-    })
-}
-
-/// The adapter for `id`. The set is closed, so this cannot fail.
-pub fn adapter(id: AdapterId) -> &'static dyn AgentAdapter {
-    match id {
-        AdapterId::ClaudeCode => &claude_code::ClaudeCode,
-        AdapterId::Codex => &codex::Codex,
-    }
-}
-
-/// Every adapter, in the order the UI lists them.
-pub fn all() -> impl Iterator<Item = &'static dyn AgentAdapter> {
-    AdapterId::ALL.into_iter().map(adapter)
+    all()
+        .iter()
+        .any(|adapter| adapter.is_permission_prompt(pane))
 }
 
 /// Presence checks for every agent CLI, for `/health`.
@@ -158,28 +212,12 @@ mod tests {
     use super::*;
     use forge_core::{AgentStatus, Timestamp};
 
-    #[test]
-    fn a_permission_dialog_is_recognised_whichever_cli_drew_it() {
-        assert!(looks_like_permission_prompt(
-            "Do you want to edit src/main.rs?"
-        ));
-        assert!(looks_like_permission_prompt("Allow this command? (y/n)"));
-    }
-
-    #[test]
-    fn a_screen_that_is_merely_idle_is_not_a_question_to_answer() {
-        // Offering Approve/Deny here would send `1` and Enter into a prompt.
-        assert!(!looks_like_permission_prompt("? for shortcuts"));
-        assert!(!looks_like_permission_prompt("esc to interrupt"));
-        assert!(!looks_like_permission_prompt(""));
-    }
-
     fn task(prompt: Option<&str>) -> Task {
         Task {
             id: 1,
             project_id: 1,
             title: "Add adapters".into(),
-            adapter: AdapterId::ClaudeCode,
+            adapter: AdapterId::default(),
             base_branch: "main".into(),
             branch: "forge/add-adapters-1".into(),
             worktree_path: None,
@@ -190,85 +228,105 @@ mod tests {
         }
     }
 
-    #[test]
-    fn every_adapter_id_has_an_adapter_that_agrees_about_its_id() {
-        for id in AdapterId::ALL {
-            assert_eq!(adapter(id).id(), id);
-        }
-        assert_eq!(all().count(), AdapterId::ALL.len());
+    fn claude() -> std::sync::Arc<Adapter> {
+        adapter(&forge_core::CLAUDE_CODE.parse().unwrap()).expect("a built-in")
+    }
+
+    fn settings(pairs: &[(&str, Value)]) -> Map<String, Value> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), value.clone()))
+            .collect()
     }
 
     #[test]
-    fn a_command_starts_with_the_cli_and_ends_with_the_prompt() {
-        let command = adapter(AdapterId::ClaudeCode).launch_command(&task(Some("go")), &Map::new());
+    fn the_command_starts_with_the_binary_and_ends_with_the_prompt() {
+        let command = claude().launch_command(&task(Some("fix the tests")), &Map::new());
 
-        assert_eq!(command, ["claude", "go"]);
+        assert_eq!(command.first().unwrap(), "claude");
+        assert_eq!(command.last().unwrap(), "fix the tests");
     }
 
     #[test]
-    fn a_task_without_a_prompt_just_starts_the_cli() {
+    fn a_task_with_no_prompt_gets_no_empty_argument() {
         assert_eq!(
-            adapter(AdapterId::Codex).launch_command(&task(None), &Map::new()),
-            ["codex"]
+            claude().launch_command(&task(None), &Map::new()),
+            ["claude"]
         );
         assert_eq!(
-            adapter(AdapterId::Codex).launch_command(&task(Some("   ")), &Map::new()),
-            ["codex"]
-        );
-    }
-
-    #[test]
-    fn a_hostile_prompt_stays_one_argument() {
-        let hostile = "$(rm -rf /); --dangerously-skip-permissions\nand more";
-        let command =
-            adapter(AdapterId::ClaudeCode).launch_command(&task(Some(hostile)), &Map::new());
-
-        assert_eq!(command.len(), 2);
-        assert_eq!(
-            command[1], hostile,
-            "the prompt is one argv entry, verbatim"
+            claude().launch_command(&task(Some("  ")), &Map::new()),
+            ["claude"]
         );
     }
 
     #[test]
-    fn settings_come_before_the_prompt() {
-        let settings = serde_json::json!({ "model": "opus" })
-            .as_object()
-            .unwrap()
-            .clone();
+    fn a_setting_becomes_the_arguments_its_manifest_declares() {
+        let command = claude().launch_command(
+            &task(None),
+            &settings(&[("model", Value::String("opus".into()))]),
+        );
 
-        let command = adapter(AdapterId::ClaudeCode).launch_command(&task(Some("go")), &settings);
-
-        assert_eq!(command, ["claude", "--model", "opus", "go"]);
+        assert_eq!(command, ["claude", "--model", "opus"]);
     }
 
     #[test]
-    fn every_adapter_can_recognise_all_four_live_states() {
+    fn a_setting_of_the_wrong_type_is_skipped_rather_than_stringified() {
+        // Turning `7` into "7" would hand the CLI something nobody wrote.
+        let command = claude().launch_command(
+            &task(None),
+            &settings(&[("model", Value::Number(7.into()))]),
+        );
+
+        assert_eq!(command, ["claude"]);
+    }
+
+    #[test]
+    fn a_prompt_that_looks_like_an_option_is_still_one_argv_element() {
+        let command = claude().launch_command(&task(Some("--help; rm -rf ~")), &Map::new());
+
+        assert_eq!(command.last().unwrap(), "--help; rm -rf ~");
+        assert_eq!(command.len(), 2, "one element, not several");
+    }
+
+    #[test]
+    fn a_settings_value_cannot_become_a_second_command() {
+        let hostile = "$(rm -rf ~)";
+        let command = claude().launch_command(
+            &task(None),
+            &settings(&[("model", Value::String(hostile.into()))]),
+        );
+
+        assert_eq!(command, ["claude", "--model", hostile]);
+    }
+
+    #[test]
+    fn both_built_ins_load_and_can_read_a_screen() {
+        assert_eq!(all().len(), 2);
+
         for adapter in all() {
-            let recognised: Vec<AgentStatus> = adapter.status_patterns().statuses().collect();
-
-            for expected in [
-                AgentStatus::Waiting,
-                AgentStatus::Working,
-                AgentStatus::Idle,
-                AgentStatus::Error,
-            ] {
-                assert!(
-                    recognised.contains(&expected),
-                    "{} cannot recognise {expected}",
-                    adapter.id()
-                );
-            }
+            assert!(!adapter.status_patterns().sets.is_empty());
+            assert!(!adapter.binary_name().is_empty());
         }
     }
 
     #[test]
-    fn waiting_is_checked_before_anything_else() {
-        // A CLI keeps its status line on screen while it asks a question, so
-        // the question has to win.
-        for adapter in all() {
-            let first = adapter.status_patterns().statuses().next();
-            assert_eq!(first, Some(AgentStatus::Waiting), "{}", adapter.id());
-        }
+    fn a_permission_dialog_is_recognised_whichever_cli_drew_it() {
+        assert!(looks_like_permission_prompt(
+            "Do you want to edit src/main.rs?"
+        ));
+        assert!(looks_like_permission_prompt("Allow this command? (y/n)"));
+    }
+
+    #[test]
+    fn a_screen_that_is_merely_idle_is_not_a_question_to_answer() {
+        assert!(!looks_like_permission_prompt("? for shortcuts"));
+        assert!(!looks_like_permission_prompt("esc to interrupt"));
+        assert!(!looks_like_permission_prompt(""));
+    }
+
+    #[test]
+    fn answering_uses_the_keys_the_manifest_declares() {
+        assert_eq!(claude().answer_keys(true), ["1", "Enter"]);
+        assert_eq!(claude().answer_keys(false), ["Escape"]);
     }
 }

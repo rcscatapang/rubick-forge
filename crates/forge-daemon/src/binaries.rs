@@ -18,13 +18,21 @@ pub const REQUIRED: [&str; 2] = ["tmux", "git"];
 
 /// Look `name` up on `PATH` and ask it for its version.
 pub async fn probe(name: &str) -> BinaryStatus {
+    probe_with(name, &["--version".to_owned()]).await
+}
+
+/// Probe with the arguments a manifest says produce a version.
+///
+/// Not every CLI spells it `--version`, and a manifest that had to is a
+/// manifest that could not describe some real agent.
+pub async fn probe_with(name: &str, version_args: &[String]) -> BinaryStatus {
     let Some(path) = exec::which(name) else {
         return BinaryStatus::missing(name);
     };
 
     let found = path.display().to_string();
 
-    match exec::run(name, &["--version"], None, PROBE_TIMEOUT).await {
+    match exec::run(name, version_args, None, PROBE_TIMEOUT).await {
         Ok(output) if output.success() => {
             let version = first_line(&output.stdout);
 

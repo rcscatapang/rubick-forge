@@ -77,7 +77,8 @@ and read; [docs/app.md](docs/app.md) what the desktop app does and does not
 hold; [docs/api.md](docs/api.md) the HTTP/WS surface;
 [docs/remote.md](docs/remote.md) the tailnet bind and adding a second Mac;
 [docs/telegram.md](docs/telegram.md) the bot; [docs/github.md](docs/github.md)
-pull requests and CI status; [docs/hub.md](docs/hub.md) the task queue.
+pull requests and CI status; [docs/hub.md](docs/hub.md) the task queue;
+[docs/plugins.md](docs/plugins.md) adapter manifests and event hooks.
 
 ## Security posture
 

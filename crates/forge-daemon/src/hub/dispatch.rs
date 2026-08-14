@@ -129,7 +129,7 @@ async fn dispatch_one(state: &AppState, fleet: &Fleet, row: &QueuedTask, invento
         project_id,
         title: row.title.clone(),
         prompt: row.prompt.clone().unwrap_or_default(),
-        adapter: row.adapter,
+        adapter: row.adapter.clone(),
         idempotency_key: Some(format!("forge-queue-{}", row.id)),
     };
 

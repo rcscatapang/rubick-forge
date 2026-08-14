@@ -15,6 +15,8 @@ Everything the daemon remembers lives in
 | `daemon.toml` | Bind addresses, port, machine name, worktree root override |
 | `token` | The bearer token, `0600` |
 | `logs/` | Rotated daemon logs |
+| `adapters/` | TOML adapter manifests — see [plugins.md](plugins.md) |
+| `hooks/`, `hooks.toml` | Event-hook scripts and what runs when |
 
 Set `FORGE_STATE_DIR` to relocate all of it. The LaunchAgent records whatever
 directory it was installed from, so an install done with the variable set keeps

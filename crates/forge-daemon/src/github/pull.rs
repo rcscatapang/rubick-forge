@@ -102,7 +102,7 @@ mod tests {
             id: 12,
             project_id: 1,
             title: "Fix the flaky test".into(),
-            adapter: AdapterId::ClaudeCode,
+            adapter: AdapterId::default(),
             base_branch: "main".into(),
             branch: "forge/fix-the-flaky-test-12".into(),
             worktree_path: None,

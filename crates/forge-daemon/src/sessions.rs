@@ -383,7 +383,8 @@ impl<R: SessionRuntime> SessionManager<R> {
         session: &Session,
         pane: &crate::runtime::PaneState,
     ) -> Result<Outcome, SessionManagerError> {
-        let patterns = self.patterns_for(session.task_id)?;
+        let adapter = self.adapter_for(session.task_id)?;
+        let patterns = adapter.status_patterns();
 
         // Capturing is the expensive part of a poll, so it is skipped when the
         // pane is dead — whose verdict does not depend on the screen — and
@@ -532,16 +533,25 @@ impl<R: SessionRuntime> SessionManager<R> {
     }
 
     /// The markers for whichever adapter a task runs.
-    fn patterns_for(
+    /// The adapter whose markers read this task's screen.
+    ///
+    /// Held as an `Arc` rather than borrowed: manifests can be reloaded, and a
+    /// poller holding a reference into the registry would pin the old one.
+    fn adapter_for(
         &self,
         task_id: i64,
-    ) -> Result<&'static crate::adapters::markers::StatusPatterns, SessionManagerError> {
+    ) -> Result<std::sync::Arc<crate::adapters::Adapter>, SessionManagerError> {
         let task = self
             .store
             .task(task_id)?
             .ok_or_else(|| StoreError::Corrupt(format!("task {task_id} is gone")))?;
 
-        Ok(adapters::adapter(task.adapter).status_patterns())
+        adapters::adapter(&task.adapter).ok_or_else(|| {
+            SessionManagerError::Runtime(format!(
+                "no adapter called `{}` is loaded, so this session cannot be read",
+                task.adapter
+            ))
+        })
     }
 
     fn trackers(&self) -> std::sync::MutexGuard<'_, HashMap<i64, Tracker>> {

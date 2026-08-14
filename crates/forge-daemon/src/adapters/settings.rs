@@ -12,8 +12,8 @@ use super::{SettingDef, SettingKind};
 /// A settings blob a project cannot be saved with.
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsError {
-    #[error("`{0}` is not an adapter this daemon knows; expected one of: claude-code, codex")]
-    UnknownAdapter(String),
+    #[error("`{0}` is not a usable adapter id: use lowercase letters, digits and dashes")]
+    UnusableAdapterId(String),
     #[error("settings for `{adapter}` must be an object, not {found}")]
     NotAnObject { adapter: AdapterId, found: String },
     #[error("`{adapter}.{key}` must be a string, number or boolean, not {found}")]
@@ -36,16 +36,17 @@ pub enum SettingsError {
 /// The outer shape is enforced by parsing; what is left is the values, which
 /// become command-line flags and so have to be scalars.
 pub fn validate(settings: &AdapterSettings) -> Result<(), SettingsError> {
-    for adapter in AdapterId::ALL {
-        let Some(values) = settings.get(adapter) else {
+    for loaded in super::all() {
+        let adapter = loaded.id().clone();
+        let Some(values) = settings.get(&adapter) else {
             continue;
         };
-        let schema = super::adapter(adapter).settings_schema();
+        let schema = loaded.settings_schema();
 
         for (key, value) in values {
             if !is_scalar(value) {
                 return Err(SettingsError::UnusableValue {
-                    adapter,
+                    adapter: adapter.clone(),
                     key: key.clone(),
                     found: describe(value),
                 });
@@ -54,10 +55,10 @@ pub fn validate(settings: &AdapterSettings) -> Result<(), SettingsError> {
             // A key the adapter documents has to be the kind it documents.
             // One it does not is kept as given, so a setting added ahead of
             // daemon support is not lost.
-            if let Some(def) = schema.iter().find(|def| def.key == key) {
+            if let Some(def) = schema.iter().find(|def| &def.key == key) {
                 if !matches_kind(def, value) {
                     return Err(SettingsError::WrongKind {
-                        adapter,
+                        adapter: adapter.clone(),
                         key: key.clone(),
                         expected: expected(def.kind),
                         found: describe(value),
@@ -106,13 +107,13 @@ fn describe(value: &Value) -> String {
 /// Turn a raw JSON blob into settings, naming what is wrong when it is not.
 pub fn parse(raw: Value) -> Result<AdapterSettings, SettingsError> {
     let Value::Object(adapters) = &raw else {
-        return Err(SettingsError::UnknownAdapter(describe(&raw)));
+        return Err(SettingsError::UnusableAdapterId(describe(&raw)));
     };
 
     for (name, value) in adapters {
         let adapter: AdapterId = name
             .parse()
-            .map_err(|_| SettingsError::UnknownAdapter(name.clone()))?;
+            .map_err(|_| SettingsError::UnusableAdapterId(name.clone()))?;
 
         if !value.is_object() {
             return Err(SettingsError::NotAnObject {
@@ -130,6 +131,10 @@ pub fn parse(raw: Value) -> Result<AdapterSettings, SettingsError> {
 
 #[cfg(test)]
 mod tests {
+    fn codex() -> AdapterId {
+        "codex".parse().unwrap()
+    }
+
     use super::*;
     use serde_json::json;
 
@@ -142,15 +147,15 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            settings.get(AdapterId::ClaudeCode).unwrap()["model"],
+            settings.get(&AdapterId::default()).unwrap()["model"],
             "opus"
         );
-        assert!(settings.get(AdapterId::Codex).unwrap().is_empty());
+        assert!(settings.get(&"codex".parse().unwrap()).unwrap().is_empty());
     }
 
     #[test]
     fn an_empty_blob_is_fine() {
-        assert!(parse(json!({})).unwrap().get(AdapterId::Codex).is_none());
+        assert!(parse(json!({})).unwrap().get(&codex()).is_none());
     }
 
     #[test]
@@ -169,29 +174,39 @@ mod tests {
         let settings = parse(json!({ "claude-code": { "future-flag": "on" } })).unwrap();
 
         assert_eq!(
-            settings.get(AdapterId::ClaudeCode).unwrap()["future-flag"],
+            settings.get(&AdapterId::default()).unwrap()["future-flag"],
             "on"
         );
     }
 
     #[test]
-    fn an_unknown_adapter_is_named_in_the_error() {
-        let err = parse(json!({ "aider": {} })).unwrap_err();
+    fn settings_for_an_adapter_that_is_not_loaded_are_kept() {
+        // Adapters are files now. Settings written before a manifest arrives —
+        // or while it is temporarily broken — must survive, the same way an
+        // unrecognised key does.
+        let settings = parse(json!({ "aider": { "model": "sonnet" } })).unwrap();
 
-        assert!(matches!(err, SettingsError::UnknownAdapter(name) if name == "aider"));
+        assert_eq!(
+            settings.get(&"aider".parse().unwrap()).unwrap()["model"],
+            json!("sonnet")
+        );
+    }
+
+    #[test]
+    fn an_id_that_could_never_be_an_adapter_is_still_refused() {
+        let err = parse(json!({ "../evil": {} })).unwrap_err();
+
+        assert!(matches!(err, SettingsError::UnusableAdapterId(name) if name == "../evil"));
     }
 
     #[test]
     fn an_adapters_settings_must_be_an_object() {
         let err = parse(json!({ "codex": "opus" })).unwrap_err();
 
-        assert!(matches!(
-            err,
-            SettingsError::NotAnObject {
-                adapter: AdapterId::Codex,
-                ..
-            }
-        ));
+        let SettingsError::NotAnObject { adapter, .. } = err else {
+            panic!("a string is not an object");
+        };
+        assert_eq!(adapter, codex());
     }
 
     #[test]

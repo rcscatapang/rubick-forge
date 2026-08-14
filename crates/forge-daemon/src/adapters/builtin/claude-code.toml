@@ -1,0 +1,78 @@
+# Claude Code, as a manifest.
+#
+# Compiled into the binary and loaded through exactly the same path as a file
+# in the adapters directory — so this doubles as the worked example, and as
+# proof that the engine is enough to describe a real CLI.
+
+manifest_version = 1
+id = "claude-code"
+name = "Claude Code"
+binary = "claude"
+
+# Marker sets are tried in order, and order is the design. `waiting` comes
+# first because the CLI usually keeps its status line on screen while it asks a
+# question, and being wrong about `waiting` is the expensive mistake: it is the
+# state a human has to be told about.
+#
+# Every marker is a literal fragment of somebody else's interface. They stop
+# matching when that interface changes, and the honest failure is a status that
+# stays where it was rather than a wrong one.
+
+[[status]]
+status = "waiting"
+markers = [
+    "Do you want to",
+    "Enter to confirm",
+    "esc to cancel",
+    "Esc to cancel",
+    "1. Yes",
+    "❯ 1.",
+    "(y/n)",
+    "Allow this",
+    "Would you like",
+]
+# The subset that means "answering yes or no makes sense here". Narrower than
+# the markers above, which are tuned for recall.
+permission_markers = [
+    "Do you want to",
+    "Allow this",
+    "Would you like",
+    "(y/n)",
+    "1. Yes",
+]
+
+[[status]]
+status = "error"
+markers = [
+    "Execution error",
+    "API Error",
+    "Credit balance is too low",
+    "Invalid API key",
+    "Please run /login",
+]
+
+[[status]]
+status = "working"
+# The working footer shows an elapsed timer and a token count.
+markers = ["esc to interrupt", "tokens · esc", "· esc to"]
+
+[[status]]
+status = "idle"
+markers = ["auto mode on", "shift+tab to cycle", 'Try "how does', "? for shortcuts"]
+
+[[settings]]
+key = "model"
+kind = "text"
+description = "Model to run, passed as --model."
+args = ["--model", "{value}"]
+
+[[settings]]
+key = "permission_mode"
+kind = "text"
+description = "Passed as --permission-mode, e.g. acceptEdits or plan."
+args = ["--permission-mode", "{value}"]
+
+[[settings]]
+key = "extra_args"
+kind = "text"
+description = "Extra command-line arguments, split on spaces."

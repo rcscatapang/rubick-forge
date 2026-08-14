@@ -271,7 +271,7 @@ mod tests {
         let mut settings = AdapterSettings::default();
         let mut claude = Map::new();
         claude.insert("model".into(), Value::String(model.into()));
-        settings.set(AdapterId::ClaudeCode, claude);
+        settings.set(AdapterId::default(), claude);
         settings
     }
 
@@ -351,7 +351,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            patched.adapter_settings.get(AdapterId::ClaudeCode).unwrap()["model"],
+            patched.adapter_settings.get(&AdapterId::default()).unwrap()["model"],
             "sonnet"
         );
     }

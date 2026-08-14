@@ -45,6 +45,20 @@ impl StateDir {
         })
     }
 
+    /// The adapters directory, where TOML manifests live.
+    pub fn adapters_dir(&self) -> PathBuf {
+        self.root().join("adapters")
+    }
+
+    /// The hooks directory, where event-hook scripts live.
+    pub fn hooks_dir(&self) -> PathBuf {
+        self.root().join("hooks")
+    }
+
+    pub fn hooks_config(&self) -> PathBuf {
+        self.root().join("hooks.toml")
+    }
+
     pub fn root(&self) -> &Path {
         &self.0
     }

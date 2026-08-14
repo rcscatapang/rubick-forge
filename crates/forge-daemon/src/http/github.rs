@@ -319,7 +319,7 @@ pub async fn task_from_issue(
         project.id,
         pull::issue_task_title(issue.number, &issue.title),
         pull::issue_prompt(issue.number, &issue.title, issue.body.as_deref()),
-        forge_core::AdapterId::ClaudeCode,
+        forge_core::AdapterId::default(),
         // Started by hand from a browser; nobody is retrying this.
         None,
     )

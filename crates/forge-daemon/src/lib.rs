@@ -12,6 +12,7 @@ pub mod exec;
 pub mod fleet;
 pub mod git;
 pub mod github;
+pub mod hooks;
 pub mod http;
 pub mod hub;
 pub mod launchd;

@@ -17,8 +17,11 @@ fn fixture(name: &str) -> String {
         .unwrap_or_else(|err| panic!("cannot read {}: {err}", path.display()))
 }
 
+/// Every fixture is read through the manifest engine, so these test the
+/// shipped manifests rather than any Rust the built-ins used to have.
 fn classify(id: AdapterId, name: &str) -> Option<AgentStatus> {
-    adapters::adapter(id)
+    adapters::adapter(&id)
+        .expect("a built-in adapter")
         .status_patterns()
         .classify(&fixture(name))
 }
@@ -26,7 +29,7 @@ fn classify(id: AdapterId, name: &str) -> Option<AgentStatus> {
 #[test]
 fn claude_codes_trust_prompt_is_waiting() {
     assert_eq!(
-        classify(AdapterId::ClaudeCode, "claude-code.waiting-trust"),
+        classify(AdapterId::default(), "claude-code.waiting-trust"),
         Some(AgentStatus::Waiting)
     );
 }
@@ -34,7 +37,7 @@ fn claude_codes_trust_prompt_is_waiting() {
 #[test]
 fn claude_codes_empty_prompt_is_idle() {
     assert_eq!(
-        classify(AdapterId::ClaudeCode, "claude-code.idle"),
+        classify(AdapterId::default(), "claude-code.idle"),
         Some(AgentStatus::Idle)
     );
 }
@@ -42,7 +45,7 @@ fn claude_codes_empty_prompt_is_idle() {
 #[test]
 fn codexs_trust_prompt_is_waiting() {
     assert_eq!(
-        classify(AdapterId::Codex, "codex.waiting-trust"),
+        classify("codex".parse::<AdapterId>().unwrap(), "codex.waiting-trust"),
         Some(AgentStatus::Waiting)
     );
 }
@@ -50,7 +53,7 @@ fn codexs_trust_prompt_is_waiting() {
 #[test]
 fn codexs_empty_prompt_is_idle() {
     assert_eq!(
-        classify(AdapterId::Codex, "codex.idle"),
+        classify("codex".parse::<AdapterId>().unwrap(), "codex.idle"),
         Some(AgentStatus::Idle)
     );
 }
@@ -88,24 +91,21 @@ fn every_fixture_is_recognised_by_the_adapter_it_names() {
 fn a_screen_from_one_cli_is_not_read_by_the_other() {
     // Markers this loose would make every status meaningless.
     assert_ne!(
-        classify(AdapterId::Codex, "claude-code.idle"),
+        classify("codex".parse::<AdapterId>().unwrap(), "claude-code.idle"),
         Some(AgentStatus::Waiting),
         "Codex should not think Claude Code is asking it something"
     );
     assert_ne!(
-        classify(AdapterId::ClaudeCode, "codex.idle"),
+        classify(AdapterId::default(), "codex.idle"),
         Some(AgentStatus::Waiting)
     );
 }
 
 #[test]
 fn an_empty_pane_says_nothing() {
-    for id in AdapterId::ALL {
-        assert_eq!(adapters::adapter(id).status_patterns().classify(""), None);
-        assert_eq!(
-            adapters::adapter(id).status_patterns().classify("\n\n\n"),
-            None
-        );
+    for adapter in adapters::all() {
+        assert_eq!(adapter.status_patterns().classify(""), None);
+        assert_eq!(adapter.status_patterns().classify("\n\n\n"), None);
     }
 }
 
@@ -122,12 +122,13 @@ test result: FAILED. 1 passed; 2 failed
 warning: unused variable: `x`
 ";
 
-    for id in AdapterId::ALL {
-        let read = adapters::adapter(id).status_patterns().classify(ordinary);
+    for adapter in adapters::all() {
+        let read = adapter.status_patterns().classify(ordinary);
         assert_ne!(
             read,
             Some(AgentStatus::Error),
-            "{id} reads ordinary build output as its own failure"
+            "{} reads ordinary build output as its own failure",
+            adapter.id()
         );
     }
 }

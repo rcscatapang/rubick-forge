@@ -182,18 +182,29 @@ async fn adapter_settings_round_trip_and_are_shape_checked() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(patched["adapter_settings"]["claude-code"]["model"], "opus");
 
+    // Adapters are manifests now, so an id this daemon has no manifest for is
+    // settings written ahead of one arriving, not a mistake.
+    let (status, _) = harness
+        .patch(
+            &format!("/projects/{id}"),
+            json!({ "adapter_settings": { "aider": { "model": "sonnet" } } }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // An id that could never name a manifest is still refused.
     let (status, body) = harness
         .patch(
             &format!("/projects/{id}"),
-            json!({ "adapter_settings": { "aider": {} } }),
+            json!({ "adapter_settings": { "../evil": {} } }),
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body["error"]["message"].as_str().unwrap().contains("aider"));
+    assert!(body["error"]["message"].as_str().unwrap().contains("evil"));
 
     // The rejected patch changed nothing.
     let (_, project) = harness.get(&format!("/projects/{id}")).await;
-    assert_eq!(project["adapter_settings"]["claude-code"]["model"], "opus");
+    assert_eq!(project["adapter_settings"]["aider"]["model"], "sonnet");
 }
 
 #[tokio::test]
