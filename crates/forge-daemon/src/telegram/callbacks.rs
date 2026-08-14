@@ -45,7 +45,7 @@ pub struct Prompt {
 }
 
 /// Which daemon a button's task lives on. Indexes into the machines config.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MachineRef {
     Local,
     /// Position in `config.machines`, which is stable for a daemon's lifetime.
@@ -53,6 +53,25 @@ pub enum MachineRef {
 }
 
 impl MachineRef {
+    /// Where this machine sits in the fleet, which puts this Mac first.
+    ///
+    /// The ±1 between a config position and a fleet position lives here and
+    /// nowhere else; it was previously open-coded in four places.
+    pub fn fleet_index(self) -> usize {
+        match self {
+            MachineRef::Local => 0,
+            MachineRef::Remote(config_index) => config_index + 1,
+        }
+    }
+
+    /// The machine at `index` in the fleet.
+    pub fn from_fleet_index(index: usize) -> Self {
+        match index {
+            0 => MachineRef::Local,
+            other => MachineRef::Remote(other - 1),
+        }
+    }
+
     fn as_token(self) -> String {
         match self {
             MachineRef::Local => "l".to_owned(),
@@ -118,11 +137,31 @@ pub enum Tap {
     Unreadable,
 }
 
-/// The prompt a session is currently sitting on, if any.
+/// The prompt each session is currently sitting on.
 ///
 /// The bot keeps one per session — the last `agent_waiting` it announced — and
 /// forgets it as soon as anything else happens to that task.
-pub type Outstanding = HashMap<i64, i64>;
+///
+/// Keyed by [`key`] rather than by session id: ids are only unique within one
+/// daemon, and two Macs' session 3 are not the same session.
+pub type Outstanding = HashMap<SessionKey, i64>;
+
+/// One session anywhere in the fleet.
+///
+/// A newtype rather than a bare `i64`, so that inserting with the machine and
+/// reading without it cannot compile — which is exactly the bug this replaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SessionKey {
+    machine: MachineRef,
+    session_id: i64,
+}
+
+pub fn key(machine: MachineRef, session_id: i64) -> SessionKey {
+    SessionKey {
+        machine,
+        session_id,
+    }
+}
 
 /// Decide what a tap does, without doing it.
 ///
@@ -134,7 +173,7 @@ pub fn tap(data: &str, outstanding: &Outstanding) -> Tap {
         return Tap::Unreadable;
     };
 
-    match outstanding.get(&prompt.session_id) {
+    match outstanding.get(&key(prompt.machine, prompt.session_id)) {
         Some(&asked) if asked == prompt.asked => Tap::Answer(answer),
         Some(_) => Tap::Expired("That was a different question — the agent has asked again since."),
         None => Tap::Expired("That question has been answered already."),
@@ -196,7 +235,7 @@ mod tests {
 
     #[test]
     fn a_tap_on_the_question_still_on_screen_answers_it() {
-        let outstanding = Outstanding::from([(3, 941)]);
+        let outstanding = Outstanding::from([(key(MachineRef::Local, 3), 941)]);
 
         assert_eq!(
             tap(&encode(prompt(), Answer::Approve), &outstanding),
@@ -224,7 +263,7 @@ mod tests {
     fn a_tap_on_last_weeks_question_does_not_answer_this_weeks() {
         // Same session, a different question: the dangerous case, because the
         // agent *is* waiting and would accept the keys.
-        let outstanding = Outstanding::from([(3, 1_200)]);
+        let outstanding = Outstanding::from([(key(MachineRef::Local, 3), 1_200)]);
 
         assert!(matches!(
             tap(&encode(prompt(), Answer::Approve), &outstanding),
@@ -234,7 +273,7 @@ mod tests {
 
     #[test]
     fn another_sessions_question_is_not_this_ones() {
-        let outstanding = Outstanding::from([(99, 941)]);
+        let outstanding = Outstanding::from([(key(MachineRef::Local, 99), 941)]);
 
         assert!(matches!(
             tap(&encode(prompt(), Answer::Approve), &outstanding),
@@ -243,9 +282,59 @@ mod tests {
     }
 
     #[test]
+    fn fleet_positions_round_trip_with_this_mac_first() {
+        assert_eq!(MachineRef::Local.fleet_index(), 0);
+        assert_eq!(MachineRef::Remote(0).fleet_index(), 1);
+        assert_eq!(MachineRef::Remote(3).fleet_index(), 4);
+
+        for machine in [
+            MachineRef::Local,
+            MachineRef::Remote(0),
+            MachineRef::Remote(3),
+        ] {
+            assert_eq!(MachineRef::from_fleet_index(machine.fleet_index()), machine);
+        }
+    }
+
+    #[test]
+    fn a_remote_machines_question_is_answerable_too() {
+        // The bug this guards: keying the map by session id alone made every
+        // remote tap miss, so the buttons were dead on the fleet case the
+        // feature exists for.
+        let remote = Prompt {
+            machine: MachineRef::Remote(1),
+            ..prompt()
+        };
+        let outstanding = Outstanding::from([(key(MachineRef::Remote(1), 3), 941)]);
+
+        assert_eq!(
+            tap(&encode(remote, Answer::Approve), &outstanding),
+            Tap::Answer(Answer::Approve)
+        );
+    }
+
+    #[test]
+    fn two_machines_session_three_are_not_the_same_question() {
+        // Only the local machine's session 3 is waiting.
+        let outstanding = Outstanding::from([(key(MachineRef::Local, 3), 941)]);
+        let remote = Prompt {
+            machine: MachineRef::Remote(0),
+            ..prompt()
+        };
+
+        assert!(matches!(
+            tap(&encode(remote, Answer::Approve), &outstanding),
+            Tap::Expired(_)
+        ));
+    }
+
+    #[test]
     fn a_payload_the_bot_did_not_write_is_refused_not_guessed() {
         assert_eq!(
-            tap("nonsense", &Outstanding::from([(3, 941)])),
+            tap(
+                "nonsense",
+                &Outstanding::from([(key(MachineRef::Local, 3), 941)])
+            ),
             Tap::Unreadable
         );
     }

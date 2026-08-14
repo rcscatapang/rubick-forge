@@ -29,6 +29,8 @@ pub struct Update {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Message {
+    /// Needed to edit the message later — to take answered buttons off it.
+    pub message_id: i64,
     pub chat: Chat,
     #[serde(default)]
     pub from: Option<User>,
@@ -280,11 +282,13 @@ mod tests {
 
     #[test]
     fn a_message_without_text_parses_as_one_without_text() {
-        let update: Update =
-            serde_json::from_str(r#"{"update_id":7,"message":{"chat":{"id":5},"from":{"id":9}}}"#)
-                .unwrap();
+        let update: Update = serde_json::from_str(
+            r#"{"update_id":7,"message":{"message_id":3,"chat":{"id":5},"from":{"id":9}}}"#,
+        )
+        .unwrap();
 
         let message = update.message.expect("there is a message");
+        assert_eq!(message.message_id, 3);
         assert_eq!(message.chat.id, 5);
         assert_eq!(message.from.expect("a sender").id, 9);
         assert!(message.text.is_none());

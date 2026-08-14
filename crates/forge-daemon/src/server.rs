@@ -68,6 +68,11 @@ impl Daemon {
         }
     }
 
+    /// Start the Telegram bot, if this is the Mac that hosts it.
+    pub fn attend(&self) {
+        crate::telegram::spawn(self.state.clone());
+    }
+
     /// Watch live sessions until the daemon shuts down.
     ///
     /// Without this the daemon only notices a session ending when it next

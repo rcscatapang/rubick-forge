@@ -89,18 +89,71 @@ pub fn cap(text: &str) -> String {
     format!("{}\n…", kept.trim_end())
 }
 
-/// Escape the four characters Telegram's MarkdownV2 treats as structure inside
-/// a code block.
+/// Escape the two characters that mean something *inside* a fenced block.
 ///
-/// Only `\` and `` ` `` matter inside one, but a stray backtick in pane output
-/// would end the block and let the rest be parsed as markup.
+/// A stray backtick in pane output would end the block and let the rest be
+/// parsed as markup.
 pub fn escape_code(text: &str) -> String {
     text.replace('\\', "\\\\").replace('`', "\\`")
+}
+
+/// Every character MarkdownV2 reserves outside a code block.
+///
+/// Telegram rejects the whole message for one unescaped `.` or `(`, which is
+/// how prose as ordinary as "Nothing is running." becomes an undelivered
+/// message and a log line nobody reads.
+const RESERVED: [char; 18] = [
+    '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!',
+];
+
+pub fn escape_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+
+    for c in text.chars() {
+        if RESERVED.contains(&c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+
+    out
 }
 
 /// Pane output as a fenced block, which is how terminal text stays legible.
 pub fn code_block(text: &str) -> String {
     format!("```\n{}\n```", escape_code(text))
+}
+
+/// A message ready to send: prose escaped, pane output fenced.
+///
+/// The two halves are escaped differently and must not be confused, so the
+/// only way to build a reply is to say which is which.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reply(String);
+
+impl Reply {
+    /// Prose, with nothing in it that Telegram will read as markup.
+    pub fn plain(text: &str) -> Self {
+        Self(escape_text(&cap(text)))
+    }
+
+    /// Prose, then what was on the agent's screen.
+    pub fn with_pane(text: &str, pane: &str) -> Self {
+        let tail = sanitise_tail(pane);
+        if tail.is_empty() {
+            return Self::plain(text);
+        }
+
+        Self(format!(
+            "{}\n{}",
+            escape_text(&cap(text)),
+            code_block(&tail)
+        ))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// The emoji that carries a status at a glance in a chat list.
@@ -204,6 +257,40 @@ mod tests {
         assert!(inner
             .match_indices('`')
             .all(|(at, _)| inner[..at].ends_with('\\')));
+    }
+
+    #[test]
+    fn prose_telegram_would_reject_is_escaped() {
+        // A full stop is reserved in MarkdownV2. Unescaped, this whole message
+        // comes back as a 400 and is never delivered.
+        assert_eq!(escape_text("Nothing is running."), "Nothing is running\\.");
+        assert_eq!(escape_text("api-server (1)"), "api\\-server \\(1\\)");
+        assert_eq!(escape_text("plain words"), "plain words");
+    }
+
+    #[test]
+    fn a_plain_reply_escapes_its_prose() {
+        assert_eq!(Reply::plain("Stopped it.").as_str(), "Stopped it\\.");
+    }
+
+    #[test]
+    fn a_reply_with_a_pane_escapes_each_half_its_own_way() {
+        let reply = Reply::with_pane("Sent it.", "Do you want to proceed?");
+
+        // Prose escaped...
+        assert!(reply.as_str().starts_with("Sent it\\."), "{reply:?}");
+        // ...and the pane fenced, not escaped as prose.
+        assert!(
+            reply.as_str().contains("```\nDo you want to proceed?\n```"),
+            "{reply:?}"
+        );
+    }
+
+    #[test]
+    fn a_reply_whose_pane_says_nothing_is_just_the_prose() {
+        let reply = Reply::with_pane("Sent it.", "\u{1b}[2J");
+
+        assert_eq!(reply, Reply::plain("Sent it."));
     }
 
     #[test]

@@ -117,6 +117,52 @@ pub async fn instruction(
     Ok(StatusCode::ACCEPTED)
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct AnswerRequest {
+    /// True takes the safe option, false cancels.
+    pub approve: bool,
+}
+
+/// Answer a permission dialog a running agent is showing.
+///
+/// Separate from `/instruction` because the two are different acts: an
+/// instruction is text to type, an answer is a keystroke on a dialog. The keys
+/// come from the task's adapter, so what "yes" means belongs to whoever knows
+/// that CLI's interface.
+pub async fn answer(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<i64>,
+    Json(request): Json<AnswerRequest>,
+) -> ApiResult<StatusCode> {
+    let task = load(&state, id)?;
+    let keys = crate::adapters::adapter(task.adapter).answer_keys(request.approve);
+
+    state.sessions.send_answer(id, keys).await?;
+
+    Ok(StatusCode::ACCEPTED)
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct PaneResponse {
+    pub tail: String,
+}
+
+/// What is on a task's screen right now.
+///
+/// The terminal WebSocket is the full-fidelity view; this is the one-shot
+/// readable version, for a client that cannot hold a socket open — a phone,
+/// via the bot.
+pub async fn pane(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<i64>,
+) -> ApiResult<Json<PaneResponse>> {
+    load(&state, id)?;
+
+    Ok(Json(PaneResponse {
+        tail: state.sessions.pane_tail(id).await?,
+    }))
+}
+
 /// One session, whichever task it belongs to.
 ///
 /// A terminal view knows a session id and nothing else; without this it cannot
@@ -307,6 +353,54 @@ pub async fn create(
     })?;
 
     Ok((StatusCode::CREATED, Json(task)))
+}
+
+/// Create a task and start its agent, the way `POST /tasks` then
+/// `POST /tasks/:id/start` would.
+///
+/// Shared with the Telegram bot, which has to do both in one command and must
+/// not grow a second, subtly different idea of what starting a task means.
+/// A task whose agent will not start is deleted again rather than left sitting
+/// there: nobody asked for a task, they asked for an agent.
+pub async fn create_and_start(
+    state: &AppState,
+    project_id: i64,
+    title: String,
+    prompt: String,
+) -> ApiResult<Task> {
+    let (_, Json(task)) = create(
+        State(state.clone()),
+        Json(CreateRequest {
+            project_id,
+            title,
+            // The bot has no way to ask which agent, so it takes the default.
+            adapter: AdapterId::ClaudeCode,
+            base_branch: None,
+            initial_prompt: Some(prompt),
+            use_worktree: true,
+        }),
+    )
+    .await?;
+
+    match start(State(state.clone()), UrlPath(task.id)).await {
+        Ok(_) => Ok(task),
+        Err(err) => {
+            if let Err(undo) = delete(
+                State(state.clone()),
+                UrlPath(task.id),
+                crate::http::extract::Query(DeleteQuery { force: true }),
+            )
+            .await
+            {
+                tracing::warn!(
+                    task = task.id,
+                    error = undo.message(),
+                    "cannot undo a task that would not start"
+                );
+            }
+            Err(err)
+        }
+    }
 }
 
 async fn provision(

@@ -41,6 +41,7 @@ fn run(foreground: bool) -> Result<(), Box<dyn std::error::Error>> {
         let daemon = Daemon::bootstrap(&state_dir)?;
         daemon.reconcile().await;
         daemon.watch();
+        daemon.attend();
         daemon.serve().await
     })?;
 

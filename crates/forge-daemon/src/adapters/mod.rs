@@ -41,6 +41,14 @@ pub trait AgentAdapter: Send + Sync {
     /// The settings this adapter reads out of a project's blob.
     fn settings_schema(&self) -> &'static [SettingDef];
 
+    /// Fragments that mean "this screen is asking permission", as opposed to
+    /// the other reasons an agent sits waiting.
+    ///
+    /// A subset of the `waiting` markers on purpose: those are tuned for recall
+    /// so that anything blocking reads as waiting, while these decide whether
+    /// answering yes or no is a sensible thing to offer at all.
+    fn permission_markers(&self) -> &'static [&'static str];
+
     /// Arguments derived from a project's settings for this adapter.
     fn launch_args(&self, settings: &Map<String, Value>) -> Vec<String>;
 
@@ -110,6 +118,19 @@ pub(crate) fn extra_args(settings: &Map<String, Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Whether a pane looks like it is asking permission, whichever CLI drew it.
+///
+/// Adapter-agnostic because the caller may not know which one did: an event
+/// arriving from another Mac carries the screen, not the adapter.
+pub fn looks_like_permission_prompt(pane: &str) -> bool {
+    all().any(|adapter| {
+        adapter
+            .permission_markers()
+            .iter()
+            .any(|marker| pane.contains(marker))
+    })
+}
+
 /// The adapter for `id`. The set is closed, so this cannot fail.
 pub fn adapter(id: AdapterId) -> &'static dyn AgentAdapter {
     match id {
@@ -136,6 +157,22 @@ pub async fn probe_all() -> Vec<BinaryStatus> {
 mod tests {
     use super::*;
     use forge_core::{AgentStatus, Timestamp};
+
+    #[test]
+    fn a_permission_dialog_is_recognised_whichever_cli_drew_it() {
+        assert!(looks_like_permission_prompt(
+            "Do you want to edit src/main.rs?"
+        ));
+        assert!(looks_like_permission_prompt("Allow this command? (y/n)"));
+    }
+
+    #[test]
+    fn a_screen_that_is_merely_idle_is_not_a_question_to_answer() {
+        // Offering Approve/Deny here would send `1` and Enter into a prompt.
+        assert!(!looks_like_permission_prompt("? for shortcuts"));
+        assert!(!looks_like_permission_prompt("esc to interrupt"));
+        assert!(!looks_like_permission_prompt(""));
+    }
 
     fn task(prompt: Option<&str>) -> Task {
         Task {

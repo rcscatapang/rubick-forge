@@ -9,6 +9,7 @@ pub mod bus;
 pub mod cli;
 pub mod config;
 pub mod exec;
+pub mod fleet;
 pub mod git;
 pub mod http;
 pub mod launchd;
