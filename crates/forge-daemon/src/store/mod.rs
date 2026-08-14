@@ -6,6 +6,7 @@
 //! still read while the daemon writes.
 
 mod events;
+mod github;
 mod migrations;
 mod projects;
 mod sessions;

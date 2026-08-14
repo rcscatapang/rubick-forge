@@ -13,7 +13,10 @@ mod status;
 mod timestamp;
 
 pub use adapter::{AdapterId, UnknownAdapterId};
-pub use entity::{task_branch_name, tmux_session_name, AdapterSettings, Project, Session, Task};
+pub use entity::{
+    task_branch_name, tmux_session_name, AdapterSettings, ChecksState, Project, Session, Task,
+    TaskGitHub,
+};
 pub use event::{
     EventDecodeError, EventKind, EventRecord, ForgeEvent, StopReason, UnknownEventKind,
 };

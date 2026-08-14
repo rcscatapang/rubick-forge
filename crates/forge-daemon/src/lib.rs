@@ -11,6 +11,7 @@ pub mod config;
 pub mod exec;
 pub mod fleet;
 pub mod git;
+pub mod github;
 pub mod http;
 pub mod launchd;
 pub mod logging;

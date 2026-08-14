@@ -178,7 +178,12 @@ export type EventKind =
   | "agent_waiting"
   | "agent_error"
   | "worktree_created"
-  | "worktree_removed";
+  | "worktree_removed"
+  | "pr_opened"
+  | "pr_merged"
+  | "pr_closed"
+  | "checks_passed"
+  | "checks_failed";
 
 /** Mirrors `forge_core::StopReason`. */
 export type StopReason = "requested" | "exited" | "vanished";
@@ -205,7 +210,12 @@ export type ForgeEvent =
   | { kind: "agent_waiting"; task_id: number; session_id: number; tail: string }
   | { kind: "agent_error"; task_id: number; session_id: number; detail: string }
   | { kind: "worktree_created"; task_id: number; path: string; branch: string }
-  | { kind: "worktree_removed"; task_id: number; path: string };
+  | { kind: "worktree_removed"; task_id: number; path: string }
+  | { kind: "pr_opened"; task_id: number; number: number; url: string }
+  | { kind: "pr_merged"; task_id: number; number: number; url: string }
+  | { kind: "pr_closed"; task_id: number; number: number; url: string }
+  | { kind: "checks_passed"; task_id: number; number: number; url: string }
+  | { kind: "checks_failed"; task_id: number; number: number; url: string };
 
 /** Mirrors `forge_core::EventRecord`: a stored event, flattened. */
 export type EventRecord = { id: number; ts: Timestamp } & ForgeEvent;
@@ -221,6 +231,10 @@ export const NOTIFIABLE_KINDS: readonly EventKind[] = [
   "agent_waiting",
   "task_finished",
   "agent_error",
+  // Both are the end of something the human was waiting on, and both happen
+  // while they are looking elsewhere.
+  "pr_merged",
+  "checks_failed",
 ] as const;
 
 export function isNotifiable(kind: EventKind): boolean {
@@ -255,4 +269,76 @@ export interface ApiErrorBody {
     code: string;
     message: string;
   };
+}
+
+/** Mirrors `forge_core::ChecksState`. */
+export type ChecksState = "none" | "running" | "passed" | "failed";
+
+/** Mirrors `forge_core::TaskGitHub`. Every field fills in over a task's life. */
+export interface TaskGitHub {
+  task_id: number;
+  /** The issue this task was started from. */
+  issue_number: number | null;
+  pr_number: number | null;
+  pr_url: string | null;
+  /** GitHub's own word: `open`, `merged` or `closed`. */
+  pr_state: string | null;
+  head_sha: string | null;
+  checks: ChecksState;
+  /** When the daemon last heard from GitHub. */
+  polled_at: Timestamp | null;
+}
+
+/** The body of `GET /github/links`. */
+export interface TaskGitHubList {
+  links: TaskGitHub[];
+}
+
+/** Mirrors the daemon's `RateLimit`. */
+export interface RateLimit {
+  remaining: number | null;
+  resets_at: number | null;
+}
+
+/** The body of `GET /github`. */
+export interface GitHubStatus {
+  configured: boolean;
+  rate_limit: RateLimit;
+}
+
+/** The body of `GET /projects/:id/github`. `repo: null` means not on GitHub. */
+export interface ProjectRepo {
+  repo: string | null;
+  url: string | null;
+}
+
+/** One open issue, from `GET /projects/:id/github/issues`. */
+export interface IssueSummary {
+  number: number;
+  title: string;
+  url: string;
+}
+
+export interface IssueList {
+  issues: IssueSummary[];
+}
+
+/** Mirrors `forge_daemon::git::DiffStat`: what a commit would include. */
+export interface DiffStat {
+  files: number;
+  insertions: number;
+  deletions: number;
+  paths: string[];
+}
+
+/** The body of `POST /tasks/:id/github/pull`. */
+export interface PullResponse {
+  number: number;
+  url: string;
+}
+
+/** The body of `POST /tasks/:id/github/commit`. */
+export interface CommitRequest {
+  /** Defaults to the task's title. */
+  message?: string;
 }

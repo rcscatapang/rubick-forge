@@ -10,6 +10,8 @@ const LABELS: Record<NotifiedKind, string> = {
   agent_waiting: "An agent needs you",
   task_finished: "A task finishes",
   agent_error: "An agent errors",
+  checks_failed: "CI fails on a pull request",
+  pr_merged: "A pull request is merged",
 };
 
 /**

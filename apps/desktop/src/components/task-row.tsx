@@ -1,10 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
+import { useState } from "react";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { Link } from "react-router";
 import { toast } from "sonner";
 
+import { CommitDialog } from "@/components/commit-dialog";
+import { GitHubChip } from "@/components/github-chip";
 import { StatusBadge } from "@/components/status-badge";
-import { ADAPTER_LABELS, isLive, type Task } from "@/lib/api-types";
+import { ADAPTER_LABELS, isLive, type Task, type TaskGitHub } from "@/lib/api-types";
 import { useMachineId } from "@/lib/connection";
 import { describe } from "@/lib/errors";
 import { isLocal, type Machine } from "@/lib/machines";
@@ -16,9 +19,19 @@ import { useSessions, useTaskActions, useTaskGit } from "@/lib/queries";
  * Actions are disabled by state rather than hidden, so the row does not
  * reshuffle itself every time an agent changes what it is doing.
  */
-export function TaskRow({ task, machine }: { task: Task; machine?: Machine }) {
+export function TaskRow({
+  task,
+  machine,
+  github,
+}: {
+  task: Task;
+  machine?: Machine;
+  /** This task's GitHub link, when the project is on GitHub. */
+  github?: TaskGitHub;
+}) {
   const machineId = useMachineId();
   const actions = useTaskActions();
+  const [committing, setCommitting] = useState(false);
   const git = useTaskGit(task.id);
   const sessions = useSessions(task.id);
 
@@ -44,7 +57,10 @@ export function TaskRow({ task, machine }: { task: Task; machine?: Machine }) {
             {git.data?.ahead ? ` · ${git.data.ahead} to push` : ""}
           </p>
         </div>
-        <StatusBadge status={task.status} />
+        <div className="flex shrink-0 items-center gap-2">
+          <GitHubChip link={github} />
+          <StatusBadge status={task.status} />
+        </div>
       </div>
 
       <div className="flex flex-wrap gap-1.5 text-xs">
@@ -134,6 +150,18 @@ export function TaskRow({ task, machine }: { task: Task; machine?: Machine }) {
           </>
         )}
 
+        {/* Committing needs a worktree of its own to stage; a task in the
+            repository root shares it with everything else. */}
+        {task.worktree_path && isLocalMachine(machine) && (
+          <button
+            type="button"
+            className="rounded border border-border px-2 py-1"
+            onClick={() => setCommitting((open) => !open)}
+          >
+            {committing ? "Hide commit" : "Commit…"}
+          </button>
+        )}
+
         <button
           type="button"
           className="ml-auto rounded border border-border px-2 py-1 text-[var(--status-error)] disabled:opacity-50"
@@ -146,6 +174,13 @@ export function TaskRow({ task, machine }: { task: Task; machine?: Machine }) {
           Delete
         </button>
       </div>
+
+      {committing && <CommitDialog task={task} onClose={() => setCommitting(false)} />}
     </li>
   );
+}
+
+/** Committing runs git in a worktree, which only this Mac's daemon can reach. */
+function isLocalMachine(machine?: Machine): boolean {
+  return machine === undefined || isLocal(machine);
 }

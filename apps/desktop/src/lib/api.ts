@@ -1,5 +1,12 @@
 import type {
   AdapterList,
+  CommitRequest,
+  DiffStat,
+  GitHubStatus,
+  IssueList,
+  ProjectRepo,
+  PullResponse,
+  TaskGitHubList,
   ApiErrorBody,
   CleanupWorktreeRequest,
   CreateTaskRequest,
@@ -123,6 +130,26 @@ export function client(connection: DaemonConnection) {
 
     events: (params: { after?: number; limit?: number; task?: number; newest?: boolean } = {}) =>
       request<EventPage>(connection, "events", { params }),
+
+    github: () => request<GitHubStatus>(connection, "github"),
+    setGitHubToken: (token: string) =>
+      request<void>(connection, "github/token", { method: "PUT", body: { token } }),
+    forgetGitHubToken: () =>
+      request<void>(connection, "github/token", { method: "DELETE" }),
+    githubLinks: () => request<TaskGitHubList>(connection, "github/links"),
+    projectRepo: (id: number) => request<ProjectRepo>(connection, `projects/${id}/github`),
+    projectIssues: (id: number) =>
+      request<IssueList>(connection, `projects/${id}/github/issues`),
+    taskFromIssue: (body: { project_id: number; number: number }) =>
+      request<Task>(connection, "github/tasks", { method: "POST", body }),
+    taskDiff: (id: number) => request<DiffStat>(connection, `tasks/${id}/github/diff`),
+    commitTask: (id: number, body: CommitRequest = {}) =>
+      request<{ sha: string }>(connection, `tasks/${id}/github/commit`, {
+        method: "POST",
+        body,
+      }),
+    openPull: (id: number) =>
+      request<PullResponse>(connection, `tasks/${id}/github/pull`, { method: "POST" }),
   };
 }
 

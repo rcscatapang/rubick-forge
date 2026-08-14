@@ -35,7 +35,7 @@ pub fn path_component(name: &str, fallback: &str) -> String {
 /// Deliberately strict rather than clever: git refuses names with `..`, `~`,
 /// `^`, `:`, a leading `-`, a trailing `.lock`, and more, and transliterating
 /// is not worth the surprise. A title with nothing usable falls back to the id.
-fn slugify(title: &str) -> String {
+pub fn slugify(title: &str) -> String {
     let mut slug = String::new();
 
     for ch in title.chars() {

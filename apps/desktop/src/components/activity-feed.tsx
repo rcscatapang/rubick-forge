@@ -31,6 +31,16 @@ function describe(event: EventRecord): string {
       return `Worktree on ${event.branch}`;
     case "worktree_removed":
       return `Removed a worktree for task ${event.task_id}`;
+    case "pr_opened":
+      return `Opened PR #${event.number}`;
+    case "pr_merged":
+      return `PR #${event.number} merged`;
+    case "pr_closed":
+      return `PR #${event.number} closed without merging`;
+    case "checks_passed":
+      return `Checks passed on PR #${event.number}`;
+    case "checks_failed":
+      return `Checks failed on PR #${event.number}`;
   }
 }
 

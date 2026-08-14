@@ -187,3 +187,61 @@ mod tests {
         assert!(!session.is_live());
     }
 }
+
+/// What GitHub knows about a task, for tasks in a GitHub project.
+///
+/// Every field is optional because the link is built up over a task's life: an
+/// issue number arrives at creation, a pull request when one is opened, and a
+/// check state only once CI has said something.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TaskGitHub {
+    pub task_id: i64,
+    /// The issue this task was started from.
+    pub issue_number: Option<i64>,
+    pub pr_number: Option<i64>,
+    pub pr_url: Option<String>,
+    /// GitHub's own word: `open`, `merged` or `closed`.
+    pub pr_state: Option<String>,
+    /// The commit the checks last reported on.
+    pub head_sha: Option<String>,
+    pub checks: ChecksState,
+    /// When the daemon last heard from GitHub, so a stale chip can say so.
+    pub polled_at: Option<Timestamp>,
+}
+
+/// The rolled-up state of a commit's check runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChecksState {
+    /// Nothing has reported yet, or the repository has no CI.
+    #[default]
+    None,
+    Running,
+    Passed,
+    Failed,
+}
+
+impl ChecksState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Running => "running",
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// Anything unrecognised reads as "nothing reported", which is the honest
+    /// answer for a value this daemon does not understand.
+    ///
+    /// Deliberately infallible, so it is not [`std::str::FromStr`]: a stored
+    /// word from a newer daemon must degrade rather than fail a read.
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "running" => Self::Running,
+            "passed" => Self::Passed,
+            "failed" => Self::Failed,
+            _ => Self::None,
+        }
+    }
+}

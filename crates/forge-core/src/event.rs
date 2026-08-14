@@ -23,10 +23,15 @@ pub enum EventKind {
     AgentError,
     WorktreeCreated,
     WorktreeRemoved,
+    PrOpened,
+    PrMerged,
+    PrClosed,
+    ChecksPassed,
+    ChecksFailed,
 }
 
 impl EventKind {
-    pub const ALL: [EventKind; 12] = [
+    pub const ALL: [EventKind; 17] = [
         Self::ProjectRegistered,
         Self::ProjectRemoved,
         Self::TaskCreated,
@@ -39,6 +44,11 @@ impl EventKind {
         Self::AgentError,
         Self::WorktreeCreated,
         Self::WorktreeRemoved,
+        Self::PrOpened,
+        Self::PrMerged,
+        Self::PrClosed,
+        Self::ChecksPassed,
+        Self::ChecksFailed,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -55,15 +65,29 @@ impl EventKind {
             Self::AgentError => "agent_error",
             Self::WorktreeCreated => "worktree_created",
             Self::WorktreeRemoved => "worktree_removed",
+            Self::PrOpened => "pr_opened",
+            Self::PrMerged => "pr_merged",
+            Self::PrClosed => "pr_closed",
+            Self::ChecksPassed => "checks_passed",
+            Self::ChecksFailed => "checks_failed",
         }
     }
 
     /// Whether this kind is one the desktop app turns into a native
     /// notification.
+    ///
+    /// A failed check and a merged pull request join the agent triad: both are
+    /// the end of something the human was waiting on, and both happen while
+    /// they are looking elsewhere. Nothing else GitHub reports is worth an
+    /// interruption — a pull request opening is something you just did.
     pub const fn is_notifiable(self) -> bool {
         matches!(
             self,
-            Self::AgentWaiting | Self::TaskFinished | Self::AgentError
+            Self::AgentWaiting
+                | Self::TaskFinished
+                | Self::AgentError
+                | Self::ChecksFailed
+                | Self::PrMerged
         )
     }
 }
@@ -175,6 +199,33 @@ pub enum ForgeEvent {
         task_id: i64,
         path: String,
     },
+    PrOpened {
+        task_id: i64,
+        number: i64,
+        url: String,
+    },
+    PrMerged {
+        task_id: i64,
+        number: i64,
+        url: String,
+    },
+    /// Closed without being merged, which is a different outcome to report.
+    PrClosed {
+        task_id: i64,
+        number: i64,
+        url: String,
+    },
+    ChecksPassed {
+        task_id: i64,
+        number: i64,
+        url: String,
+    },
+    /// The one GitHub event worth interrupting someone for.
+    ChecksFailed {
+        task_id: i64,
+        number: i64,
+        url: String,
+    },
 }
 
 impl ForgeEvent {
@@ -192,6 +243,11 @@ impl ForgeEvent {
             Self::AgentError { .. } => EventKind::AgentError,
             Self::WorktreeCreated { .. } => EventKind::WorktreeCreated,
             Self::WorktreeRemoved { .. } => EventKind::WorktreeRemoved,
+            Self::PrOpened { .. } => EventKind::PrOpened,
+            Self::PrMerged { .. } => EventKind::PrMerged,
+            Self::PrClosed { .. } => EventKind::PrClosed,
+            Self::ChecksPassed { .. } => EventKind::ChecksPassed,
+            Self::ChecksFailed { .. } => EventKind::ChecksFailed,
         }
     }
 
@@ -208,7 +264,12 @@ impl ForgeEvent {
             | Self::AgentWaiting { task_id, .. }
             | Self::AgentError { task_id, .. }
             | Self::WorktreeCreated { task_id, .. }
-            | Self::WorktreeRemoved { task_id, .. } => Some(*task_id),
+            | Self::WorktreeRemoved { task_id, .. }
+            | Self::PrOpened { task_id, .. }
+            | Self::PrMerged { task_id, .. }
+            | Self::PrClosed { task_id, .. }
+            | Self::ChecksPassed { task_id, .. }
+            | Self::ChecksFailed { task_id, .. } => Some(*task_id),
         }
     }
 
@@ -336,6 +397,31 @@ mod tests {
                 task_id: 2,
                 path: "/repos/.forge-worktrees/forge/add-adapters".into(),
             },
+            EventKind::PrOpened => ForgeEvent::PrOpened {
+                task_id: 2,
+                number: 41,
+                url: "https://github.com/o/n/pull/41".into(),
+            },
+            EventKind::PrMerged => ForgeEvent::PrMerged {
+                task_id: 2,
+                number: 41,
+                url: "https://github.com/o/n/pull/41".into(),
+            },
+            EventKind::PrClosed => ForgeEvent::PrClosed {
+                task_id: 2,
+                number: 41,
+                url: "https://github.com/o/n/pull/41".into(),
+            },
+            EventKind::ChecksPassed => ForgeEvent::ChecksPassed {
+                task_id: 2,
+                number: 41,
+                url: "https://github.com/o/n/pull/41".into(),
+            },
+            EventKind::ChecksFailed => ForgeEvent::ChecksFailed {
+                task_id: 2,
+                number: 41,
+                url: "https://github.com/o/n/pull/41".into(),
+            },
         }
     }
 
@@ -404,18 +490,28 @@ mod tests {
     }
 
     #[test]
-    fn exactly_the_three_notifiable_kinds() {
+    fn only_the_kinds_worth_interrupting_someone_for_are_notifiable() {
         let notifiable: Vec<_> = EventKind::ALL
             .into_iter()
             .filter(|kind| kind.is_notifiable())
             .collect();
+
         assert_eq!(
             notifiable,
             [
                 EventKind::TaskFinished,
                 EventKind::AgentWaiting,
-                EventKind::AgentError
+                EventKind::AgentError,
+                // Both are the end of something the human was waiting on.
+                EventKind::PrMerged,
+                EventKind::ChecksFailed,
             ]
         );
+    }
+
+    #[test]
+    fn opening_a_pull_request_is_not_news_to_whoever_opened_it() {
+        assert!(!EventKind::PrOpened.is_notifiable());
+        assert!(!EventKind::ChecksPassed.is_notifiable());
     }
 }

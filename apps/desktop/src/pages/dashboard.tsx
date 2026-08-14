@@ -3,17 +3,24 @@ import { toast } from "sonner";
 
 import { ActivityFeed } from "@/components/activity-feed";
 import { MachineChip } from "@/components/machine-chip";
+import { GitHubSettings } from "@/components/github-settings";
+import { IssueBrowser } from "@/components/issue-browser";
 import { MachineSettings } from "@/components/machine-settings";
 import { NotificationSettings } from "@/components/notification-settings";
 import { NewTaskForm } from "@/components/new-task";
 import { TaskRow } from "@/components/task-row";
 import { ApiError } from "@/lib/api";
-import { needsAttention, type Project, type Task } from "@/lib/api-types";
+import {
+  needsAttention,
+  type Project,
+  type Task,
+  type TaskGitHub,
+} from "@/lib/api-types";
 import { DaemonProvider } from "@/lib/connection";
 import { describe } from "@/lib/errors";
 import { useMachines } from "@/lib/machine-registry";
 import { isLocal, type Machine } from "@/lib/machines";
-import { useProjectActions, useProjects, useTasks } from "@/lib/queries";
+import { useGitHubLinks, useProjectActions, useProjects, useTasks } from "@/lib/queries";
 
 /**
  * Everything at a glance: what needs you, what is running, and what happened.
@@ -39,6 +46,7 @@ export function DashboardPage() {
 
       <ActivityFeed />
       <MachineSettings />
+      <GitHubSettings />
       <NotificationSettings />
     </main>
   );
@@ -54,6 +62,11 @@ function MachineBoard({ machine, alone }: { machine: Machine; alone: boolean }) 
   const projects = useProjects();
   const tasks = useTasks();
   const projectActions = useProjectActions();
+
+  // One request for the whole board: most tasks have no pull request, and a
+  // query each would be a request apiece to learn that.
+  const github = useGitHubLinks();
+  const links = new Map((github.data?.links ?? []).map((link) => [link.task_id, link]));
 
   const all = tasks.data?.tasks ?? [];
   const attention = all.filter((task) => needsAttention(task.status));
@@ -101,7 +114,12 @@ function MachineBoard({ machine, alone }: { machine: Machine; alone: boolean }) 
           </h3>
           <ul className="flex flex-col gap-2">
             {attention.map((task) => (
-              <TaskRow key={task.id} task={task} machine={machine} />
+              <TaskRow
+                key={task.id}
+                task={task}
+                machine={machine}
+                github={links.get(task.id)}
+              />
             ))}
           </ul>
         </section>
@@ -135,6 +153,7 @@ function MachineBoard({ machine, alone }: { machine: Machine; alone: boolean }) 
               project={project}
               tasks={byProject.get(project.id) ?? []}
               machine={machine}
+              links={links}
             />
           ))
         )}
@@ -147,10 +166,12 @@ function ProjectGroup({
   project,
   tasks,
   machine,
+  links,
 }: {
   project: Project;
   tasks: Task[];
   machine: Machine;
+  links: Map<number, TaskGitHub>;
 }) {
   return (
     <section className="flex flex-col gap-2">
@@ -161,12 +182,19 @@ function ProjectGroup({
         </span>
       </div>
 
+      {isLocal(machine) && <IssueBrowser project={project} />}
+
       {tasks.length === 0 ? (
         <p className="text-xs text-muted-foreground">No tasks yet.</p>
       ) : (
         <ul className="flex flex-col gap-2">
           {tasks.map((task) => (
-            <TaskRow key={task.id} task={task} machine={machine} />
+            <TaskRow
+              key={task.id}
+              task={task}
+              machine={machine}
+              github={links.get(task.id)}
+            />
           ))}
         </ul>
       )}
