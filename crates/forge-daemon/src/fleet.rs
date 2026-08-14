@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use forge_core::{AdapterId, Project, Session, Task};
+use forge_core::{AdapterId, EventRecord, Project, Session, Task};
 use futures_util::future::BoxFuture;
 
 use crate::config::MachineEntry;
@@ -26,6 +26,9 @@ pub struct FleetTask {
     pub project: Option<String>,
     pub session: Option<Session>,
 }
+
+/// How long to wait before reopening a remote machine's event stream.
+const RETRY_DELAYS: [u64; 5] = [1, 2, 5, 15, 30];
 
 /// What one machine can be asked, whether it is this one or another.
 ///
@@ -55,7 +58,19 @@ pub trait Machine: Send + Sync {
 
     /// The last of what is on screen, for a reply that shows what happened.
     fn pane_tail(&self, task_id: i64) -> BoxFuture<'_, Result<String, FleetError>>;
+
+    /// Follow this machine's events, calling `on_event` for each.
+    ///
+    /// Never returns: it reconnects for as long as the daemon runs. The local
+    /// machine reads its own bus; a remote one opens a WebSocket.
+    fn watch(&self, on_event: EventSink) -> BoxFuture<'_, ()>;
 }
+
+/// What to do with each event a machine reports.
+///
+/// Boxed rather than generic so `Machine` stays object-safe, which is the
+/// whole point of the trait.
+pub type EventSink = Box<dyn Fn(EventRecord) -> BoxFuture<'static, ()> + Send + Sync>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FleetError {
@@ -102,8 +117,26 @@ impl Fleet {
         self.machines.get(index).map(AsRef::as_ref)
     }
 
+    /// How many machines this daemon speaks for, this one included.
+    pub fn len(&self) -> usize {
+        self.machines.len()
+    }
+
+    /// Never true: the fleet always contains this Mac.
+    pub fn is_empty(&self) -> bool {
+        self.machines.is_empty()
+    }
+
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.machines.iter().map(|machine| machine.name())
+    }
+
+    /// Every machine, with its position, so a caller can watch each in turn.
+    pub fn each(&self) -> impl Iterator<Item = (usize, &dyn Machine)> {
+        self.machines
+            .iter()
+            .enumerate()
+            .map(|(index, machine)| (index, machine.as_ref()))
     }
 
     /// Every machine's tasks, and the machines that could not be asked.
@@ -282,6 +315,19 @@ impl Machine for LocalMachine {
                 .pane_tail(task_id)
                 .await
                 .map_err(refused)
+        })
+    }
+
+    fn watch(&self, on_event: EventSink) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let mut events = self.state.bus.subscribe();
+
+            // A lagging receiver misses events rather than blocking the bus,
+            // which is the bus's documented behaviour and not this loop's
+            // problem to solve.
+            while let Ok(record) = events.recv().await {
+                on_event(record).await;
+            }
         })
     }
 }
@@ -486,6 +532,25 @@ impl Machine for RemoteMachine {
                 .tail)
         })
     }
+
+    fn watch(&self, on_event: EventSink) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let mut attempt = 0usize;
+            let mut after: Option<i64> = None;
+
+            loop {
+                if self.stream_once(&mut after, &on_event).await.is_ok() {
+                    attempt = 0;
+                } else {
+                    tracing::debug!(machine = self.name, "a remote event stream ended");
+                }
+
+                let wait = RETRY_DELAYS[attempt.min(RETRY_DELAYS.len() - 1)];
+                attempt = attempt.saturating_add(1);
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+            }
+        })
+    }
 }
 
 impl RemoteMachine {
@@ -519,9 +584,79 @@ impl RemoteMachine {
     }
 }
 
+impl RemoteMachine {
+    /// One connection's worth of this machine's events.
+    ///
+    /// `after` is carried across reconnects, so a machine that drops off the
+    /// tailnet and comes back replays what was missed instead of losing it.
+    async fn stream_once(&self, after: &mut Option<i64>, on_event: &EventSink) -> Result<(), ()> {
+        use futures_util::StreamExt;
+
+        // Browsers cannot set headers on a handshake, so the daemon accepts the
+        // token in the query string on `/ws` routes; this client does the same.
+        let mut url = format!(
+            "{}/ws/events?token={}",
+            websocket_base(&self.base),
+            self.token
+        );
+        if let Some(seen) = after {
+            url.push_str(&format!("&after={seen}"));
+        }
+
+        // The URL has a bearer token in it, and tungstenite puts the URL it
+        // failed on into its errors. Nothing derived from it reaches a log.
+        let (mut socket, _) = tokio_tungstenite::connect_async(&url)
+            .await
+            .map_err(|_| ())?;
+
+        while let Some(frame) = socket.next().await {
+            let Ok(frame) = frame else { return Err(()) };
+            let Ok(text) = frame.into_text() else {
+                continue;
+            };
+            let Ok(record) = serde_json::from_str::<EventRecord>(&text) else {
+                continue;
+            };
+
+            *after = Some(record.id);
+            on_event(record).await;
+        }
+
+        Ok(())
+    }
+}
+
+/// An `http(s)` base as its WebSocket equivalent.
+///
+/// Only the scheme is rewritten: a blanket replace turns a host that happens to
+/// contain "http" into nonsense.
+fn websocket_base(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+
+    match trimmed.split_once("://") {
+        Some(("http", rest)) => format!("ws://{rest}"),
+        Some(("https", rest)) => format!("wss://{rest}"),
+        _ => trimmed.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_scheme_becomes_a_websocket_one() {
+        assert_eq!(
+            websocket_base("http://100.64.0.1:8787"),
+            "ws://100.64.0.1:8787"
+        );
+        assert_eq!(websocket_base("https://mini:8787/"), "wss://mini:8787");
+        // A blanket replace would have made this "ws://ws-mini:8787".
+        assert_eq!(
+            websocket_base("http://http-mini:8787"),
+            "ws://http-mini:8787"
+        );
+    }
 
     #[test]
     fn an_unreachable_machine_says_which_one_so_a_reply_can_degrade_per_machine() {

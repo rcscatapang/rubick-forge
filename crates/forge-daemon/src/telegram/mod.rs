@@ -11,7 +11,7 @@ pub mod commands;
 pub mod format;
 
 use api::{BotToken, Telegram};
-use bot::{Bot, RemoteStream};
+use bot::Bot;
 
 use crate::fleet::Fleet;
 use crate::http::AppState;
@@ -61,27 +61,10 @@ pub fn spawn(state: AppState) {
         }
     };
 
-    // The fleet puts this Mac first, so a remote machine's fleet index is one
-    // past its position in the config.
-    let remotes: Vec<RemoteStream> = state
-        .config
-        .machines
-        .iter()
-        .zip(&tokens)
-        .enumerate()
-        .map(|(at, (machine, token))| RemoteStream {
-            index: at + 1,
-            name: machine.name.clone(),
-            url: machine.url.clone(),
-            token: token.clone(),
-        })
-        .collect();
+    let fleet = std::sync::Arc::new(Fleet::new(state.clone(), &state.config.machines, &tokens));
 
-    let fleet = Fleet::new(state.clone(), &state.config.machines, &tokens);
-    let count = state.config.machines.len() + 1;
-
-    tracing::info!(machines = count, "starting the Telegram bot");
-    tokio::spawn(Bot::new(telegram, fleet, state, &config, remotes).run());
+    tracing::info!(machines = fleet.len(), "starting the Telegram bot");
+    tokio::spawn(Bot::new(telegram, fleet, state, &config).run());
 }
 
 /// One secret from the login keychain.

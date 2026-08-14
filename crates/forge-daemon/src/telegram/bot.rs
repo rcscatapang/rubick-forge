@@ -33,21 +33,10 @@ impl Allowlist {
     }
 }
 
-/// One remote machine's event stream, and where it sits in the fleet.
-#[derive(Clone)]
-pub struct RemoteStream {
-    /// Position in the fleet, which is what a button payload records.
-    pub index: usize,
-    pub name: String,
-    pub url: String,
-    pub token: String,
-}
-
 pub struct Bot {
     telegram: Telegram,
-    fleet: Fleet,
+    fleet: Arc<Fleet>,
     state: AppState,
-    remotes: Vec<RemoteStream>,
     allowlist: Allowlist,
     /// The last question announced per session, which is what makes a stale
     /// button tap expire rather than answer the wrong thing.
@@ -57,16 +46,14 @@ pub struct Bot {
 impl Bot {
     pub fn new(
         telegram: Telegram,
-        fleet: Fleet,
+        fleet: Arc<Fleet>,
         state: AppState,
         config: &TelegramConfig,
-        remotes: Vec<RemoteStream>,
     ) -> Self {
         Self {
             telegram,
             fleet,
             state,
-            remotes,
             allowlist: Allowlist {
                 ids: config.allowed_user_ids.clone(),
             },
@@ -78,11 +65,10 @@ impl Bot {
     pub async fn run(self) {
         let bot = Arc::new(self);
 
-        // This Mac's own bus, and one socket per other Mac. Each reconnects on
-        // its own, so a machine that sleeps costs only its own stream.
-        tokio::spawn(Arc::clone(&bot).watch_events());
-        for remote in bot.remotes.clone() {
-            tokio::spawn(Arc::clone(&bot).watch_remote(remote));
+        // Every machine's events, this Mac's included. Each stream reconnects
+        // on its own, so a machine that sleeps costs only its own.
+        for index in 0..bot.fleet.len() {
+            tokio::spawn(Arc::clone(&bot).watch_machine(index));
         }
 
         let mut offset = bot.stored_offset();
@@ -385,74 +371,32 @@ impl Bot {
         }
     }
 
-    /// Follow one remote machine's event stream, reconnecting for as long as
-    /// the daemon runs.
-    async fn watch_remote(self: Arc<Self>, remote: RemoteStream) {
-        let mut attempt = 0usize;
-        let mut after: Option<i64> = None;
-
-        loop {
-            match self.stream_once(&remote, &mut after).await {
-                Ok(()) => attempt = 0,
-                Err(error) => {
-                    tracing::debug!(machine = remote.name, %error, "a remote event stream ended");
-                }
-            }
-
-            let wait = RETRY_DELAYS[attempt.min(RETRY_DELAYS.len() - 1)];
-            attempt = attempt.saturating_add(1);
-            tokio::time::sleep(Duration::from_secs(wait)).await;
-        }
-    }
-
-    /// One connection's worth of a remote machine's events.
+    /// Follow one machine's events for as long as the daemon runs.
     ///
-    /// `after` is carried across reconnects, so a machine that drops off the
-    /// tailnet and comes back replays what was missed instead of losing it.
-    async fn stream_once(
-        &self,
-        remote: &RemoteStream,
-        after: &mut Option<i64>,
-    ) -> Result<(), String> {
-        use futures_util::StreamExt;
+    /// Reconnecting and resuming belong to the fleet — "how to reach that Mac"
+    /// is its job, not the bot's. All the bot supplies is what to do with each
+    /// event that arrives.
+    async fn watch_machine(self: Arc<Self>, index: usize) {
+        let Some(machine) = self.fleet.at(index) else {
+            return;
+        };
 
-        // Browsers cannot set headers on a handshake, so the daemon accepts the
-        // token in the query string on `/ws` routes; this client does the same.
-        let mut url = format!(
-            "{}/ws/events?token={}",
-            websocket_base(&remote.url),
-            remote.token
-        );
-        if let Some(seen) = after {
-            url.push_str(&format!("&after={seen}"));
-        }
+        let who = MachineRef::from_fleet_index(index);
+        // Only a remote machine's name is worth saying; the local one is the
+        // Mac the reader is already thinking of.
+        let label = (index > 0).then(|| machine.name().to_owned());
 
-        // The URL has a bearer token in it, and tungstenite puts the URL in its
-        // errors. Nothing derived from it reaches a log.
-        let (mut socket, _) = tokio_tungstenite::connect_async(&url)
-            .await
-            .map_err(|_| format!("cannot open {}'s event stream", remote.name))?;
+        let bot = Arc::clone(&self);
+        machine
+            .watch(Box::new(move |record| {
+                let bot = Arc::clone(&bot);
+                let label = label.clone();
 
-        while let Some(frame) = socket.next().await {
-            let frame = frame.map_err(|_| format!("{}'s event stream ended", remote.name))?;
-            let Ok(text) = frame.into_text() else {
-                continue;
-            };
-
-            let Ok(record) = serde_json::from_str::<EventRecord>(&text) else {
-                continue;
-            };
-
-            *after = Some(record.id);
-            self.push_from(
-                MachineRef::Remote(remote.index - 1),
-                Some(&remote.name),
-                record,
-            )
+                Box::pin(async move {
+                    bot.push_from(who, label.as_deref(), record).await;
+                })
+            }))
             .await;
-        }
-
-        Ok(())
     }
 
     async fn answer(&self, data: &str, answer: Answer) -> String {
@@ -478,19 +422,6 @@ impl Bot {
         } else {
             "Denied.".to_owned()
         }
-    }
-
-    /// Push the three signal kinds from this Mac's own bus.
-    async fn watch_events(self: Arc<Self>) {
-        let mut events = self.state.bus.subscribe();
-
-        while let Ok(record) = events.recv().await {
-            self.push(record).await;
-        }
-    }
-
-    async fn push(&self, record: EventRecord) {
-        self.push_from(MachineRef::Local, None, record).await;
     }
 
     /// Announce one event, from whichever machine it happened on.
@@ -620,20 +551,6 @@ impl Bot {
     }
 }
 
-/// An `http(s)` base as its WebSocket equivalent.
-///
-/// Only the scheme is rewritten: a blanket replace turns a host that happens to
-/// contain "http" into nonsense.
-fn websocket_base(url: &str) -> String {
-    let trimmed = url.trim_end_matches('/');
-
-    match trimmed.split_once("://") {
-        Some(("http", rest)) => format!("ws://{rest}"),
-        Some(("https", rest)) => format!("wss://{rest}"),
-        _ => trimmed.to_owned(),
-    }
-}
-
 fn session_of(event: &ForgeEvent) -> Option<i64> {
     match event {
         ForgeEvent::AgentWaiting { session_id, .. }
@@ -735,20 +652,6 @@ mod tests {
     fn a_prompt_with_no_words_still_produces_a_title() {
         assert_eq!(title_from("   "), "Task from Telegram");
         assert_eq!(title_from("..."), "Task from Telegram");
-    }
-
-    #[test]
-    fn only_the_scheme_becomes_a_websocket_one() {
-        assert_eq!(
-            websocket_base("http://100.64.0.1:8787"),
-            "ws://100.64.0.1:8787"
-        );
-        assert_eq!(websocket_base("https://mini:8787/"), "wss://mini:8787");
-        // A blanket replace would have made this "ws://ws-mini:8787".
-        assert_eq!(
-            websocket_base("http://http-mini:8787"),
-            "ws://http-mini:8787"
-        );
     }
 
     #[test]
