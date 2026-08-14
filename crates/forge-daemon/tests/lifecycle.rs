@@ -124,6 +124,23 @@ impl Fixture {
     }
 }
 
+/// Start a task's session the way [`Fixture::start`] does, for tests that own
+/// a bare harness rather than a fixture: in process, running a plain shell.
+///
+/// The HTTP route looks the task's agent CLI up on `PATH` first, which is not
+/// what these tests are about and is not installed on CI.
+async fn start_bare(harness: &Harness, task_id: i64) {
+    let task = harness.store().task(task_id).unwrap().unwrap();
+    let project = harness.store().project(task.project_id).unwrap().unwrap();
+
+    harness
+        .state
+        .sessions
+        .start(&task, &project, &[])
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn starting_a_task_creates_a_session_in_its_worktree() {
     let fixture = Fixture::new().await;
@@ -564,9 +581,7 @@ async fn reconciling_many_sessions_is_quick() {
                 }),
             )
             .await;
-        let id = task["id"].as_i64().unwrap();
-        let (status, session) = harness.post(&format!("/tasks/{id}/start"), json!({})).await;
-        assert_eq!(status, StatusCode::CREATED, "{session}");
+        start_bare(&harness, task["id"].as_i64().unwrap()).await;
     }
 
     let started = std::time::Instant::now();
@@ -625,9 +640,8 @@ async fn a_task_without_a_worktree_runs_in_the_repository_root() {
         .await;
     let id = task["id"].as_i64().unwrap();
 
-    let (status, session) = harness.post(&format!("/tasks/{id}/start"), json!({})).await;
+    start_bare(&harness, id).await;
 
-    assert_eq!(status, StatusCode::CREATED, "{session}");
     assert!(harness
         .state
         .sessions
