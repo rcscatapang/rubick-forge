@@ -129,6 +129,43 @@ impl<R: SessionRuntime> SessionManager<R> {
             .map_err(|err| SessionManagerError::Runtime(err.to_string()))
     }
 
+    /// Answer a dialog the agent is showing, as keystrokes.
+    ///
+    /// Deliberately not [`send_instruction`](Self::send_instruction): that
+    /// pastes text and presses Enter, which is right for a prompt and wrong
+    /// for a numbered list where `1` selects and Escape cancels.
+    pub async fn send_answer(
+        &self,
+        task_id: i64,
+        keys: &[&str],
+    ) -> Result<(), SessionManagerError> {
+        let session = self
+            .store
+            .live_session(task_id)?
+            .ok_or(SessionManagerError::NotRunning(task_id))?;
+
+        self.runtime
+            .send_keys(&session.tmux_name, keys)
+            .await
+            .map_err(|err| SessionManagerError::Runtime(err.to_string()))
+    }
+
+    /// What is on a task's screen now, trimmed the way an event payload is.
+    pub async fn pane_tail(&self, task_id: i64) -> Result<String, SessionManagerError> {
+        let session = self
+            .store
+            .live_session(task_id)?
+            .ok_or(SessionManagerError::NotRunning(task_id))?;
+
+        let pane = self
+            .runtime
+            .capture(&session.tmux_name, CAPTURE_LINES)
+            .await
+            .map_err(|err| SessionManagerError::Runtime(err.to_string()))?;
+
+        Ok(pane_tail(&pane))
+    }
+
     pub fn runtime(&self) -> &R {
         &self.runtime
     }

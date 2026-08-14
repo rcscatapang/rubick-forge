@@ -13,6 +13,8 @@ forge-core = { path = "crates/forge-core" }
 axum = { version = "0.8", features = ["ws"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 portable-pty = "0.9"
+keyring = "4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -24,9 +26,10 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+tokio-tungstenite = "0.30"
+
 # Dev-only
 tempfile = "3"
-tokio-tungstenite = "0.30"
 tower = { version = "0.5", features = ["util"] }
 
 [profile.release]

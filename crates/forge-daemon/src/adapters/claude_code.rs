@@ -60,6 +60,15 @@ const PATTERNS: StatusPatterns = StatusPatterns {
     ],
 };
 
+/// The subset of the waiting markers that mean "answer yes or no".
+const PERMISSION_MARKERS: &[&str] = &[
+    "Do you want to",
+    "Allow this",
+    "Would you like",
+    "(y/n)",
+    "1. Yes",
+];
+
 const SETTINGS: &[SettingDef] = &[
     SettingDef {
         key: "model",
@@ -85,6 +94,10 @@ impl AgentAdapter for ClaudeCode {
 
     fn status_patterns(&self) -> &'static StatusPatterns {
         &PATTERNS
+    }
+
+    fn permission_markers(&self) -> &'static [&'static str] {
+        PERMISSION_MARKERS
     }
 
     fn settings_schema(&self) -> &'static [SettingDef] {

@@ -4,11 +4,11 @@ mod adapters;
 pub mod auth;
 pub mod error;
 mod events;
-mod extract;
+pub(crate) mod extract;
 mod health;
 mod projects;
 mod settings;
-mod tasks;
+pub mod tasks;
 mod terminal;
 
 use std::sync::Arc;
@@ -98,6 +98,8 @@ pub fn router(state: AppState) -> Router {
             "/tasks/{id}/instruction",
             axum::routing::post(tasks::instruction),
         )
+        .route("/tasks/{id}/answer", axum::routing::post(tasks::answer))
+        .route("/tasks/{id}/pane", get(tasks::pane))
         .route(
             "/tasks/{id}/worktree/cleanup",
             axum::routing::post(tasks::cleanup_worktree),
